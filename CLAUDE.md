@@ -13,7 +13,7 @@ src/
   phase-runner.ts     Executes serial and parallel phases; manages git worktrees; provider failover
   prompt-builder.ts   Builds agent prompts with context injection and completion-via-file rule
   context-loader.ts   Reads CLAUDE.md / AGENTS.md and source files from target project to inject into prompts
-  model-selector.ts     Scores phase complexity to auto-select haiku vs sonnet (returns ModelTier)
+  model-selector.ts     Scores phase complexity + prior context size to auto-select haiku/sonnet/opus (returns ModelTier)
   provider-selector.ts  Scores phase task signals to auto-select claude vs codex per phase
   providers/
     types.ts          Provider interface, ModelTier, ProviderResult
@@ -29,6 +29,12 @@ src/
 **Parallel phase file merge** uses `copyFiles(srcDir, dstDir, files)` — copies specific files from each worktree, then `git add . && git commit`. This avoids `git merge` conflicts since teammates own disjoint file sets (enforced by `validateNoFileOverlap`).
 
 **Retry context** includes the actual verify command output (stdout + stderr) from `captureVerify()`. Always pass `lastVerifyOutput` into the next attempt's `failureContext` — vague retry prompts ("try a different approach") don't work.
+
+**Clean workdir before retry** — `runSerial` runs `git reset --hard HEAD && git clean -fd` at the start of every attempt > 1. This prevents partial writes from attempt N from confusing attempt N+1. Never skip this step.
+
+**Prior-phase context injection** — after each phase, `run.ts` accumulates all changed files (via `git diff --name-only HEAD~1 HEAD` + `result.filesWritten`). The next phase receives these as `priorPhaseFiles`, injected under "ACTUAL OUTPUT FROM PRIOR PHASES (source of truth)". This is the primary fix for downstream agents writing against the plan spec instead of the actual output. Capped at 40,000 chars; schema/constants/types files are priority-sorted to the top (`loadPriorPhaseFiles` in `context-loader.ts`).
+
+**Spec-compliance reviewer** — after each serial phase's verify passes, `reviewPhaseOutput()` spawns a fast (Haiku) agent with Read/Glob/Write tools. It reads the changed files, checks each plan task for spec adherence (field names, constants, wiring tasks), and writes `.phase-review.json`. If `passed: false` and retries remain, issues are injected as `failureContext` for the next attempt. On the last attempt, issues are logged as warnings but the phase still succeeds — the reviewer is a quality aid, not a hard gate.
 
 **Real-time output** is handled by `parseStreamWithTee` which buffers incomplete lines and prints assistant text events with a caller-supplied prefix. The buffer handles chunk boundaries correctly — do not simplify this to `chunk.toString().split('\n')`.
 
@@ -174,8 +180,17 @@ Never retry with vague prompts ("try a different approach"). Always inject the e
 **Real-time tee with line buffering**
 Stream chunks don't align with JSON line boundaries. Buffer incomplete lines in `lineBuffer` and process only on `\n`. Never call `chunk.toString().split('\n')` directly.
 
-**Model tiering by complexity**
-Mechanical tasks (file creation, migrations) → haiku. Logic tasks (service implementation, tests, algorithms) → sonnet. Never auto-select opus on a rate-limited plan. See `model-selector.ts` for the scoring heuristic.
+**Model tiering by complexity and context size**
+Three tiers — `fast` (Haiku), `standard` (Sonnet), `powerful` (Opus). Auto-selection in `model-selector.ts` scores each phase on:
+
+- *Haiku signals* (-1 each): `create file`, `scaffold`, `migrate`, `rename`, `copy`, ≤3 tasks, grep-only verify
+- *Sonnet signals* (+2 each): `implement`, `algorithm`, `service`, `engine`, `state machine`, `streaming`, test suites, ≥5 tasks, parallel mode; +1 per `.spec.ts`/`.test.ts`/`engine.ts`/`service.ts` in file list
+- *Opus signals* (+4 each): `agent`, `orchestrat`, `llm`, `multi-agent`, `tool call`; `.agent.ts`/`.tool.ts` in file list
+- *Hard floors*: 7+ tasks → minimum Sonnet (score ≥ 3); prior context > 8k chars → minimum Sonnet; prior context > 25k chars → +3 additional (large prompts degrade Haiku quality significantly)
+
+Thresholds: score ≥ 8 → Opus · score ≥ 3 → Sonnet · else → Haiku.
+
+The prior-context floor is the key guard: because prompts now carry up to 40k chars of prior-phase output, any non-first phase with meaningful context automatically routes to Sonnet minimum. Haiku is only used for truly isolated mechanical phases with no prior context.
 
 **Budget cap per phase**
 Always pass `--max-budget-usd` to every claude invocation. This is the only real guard against runaway costs — there is no `--max-turns` flag. Scale the budget proportionally to the phase timeout.

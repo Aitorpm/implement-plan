@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "postbuild": "cp -r src/skill dist/skill && cp PLAN_WRITING_GUIDE.md dist/ && cp -r examples dist/",
-    "dev": "tsx src/run.ts"
+    "dev": "tsx src/run.ts",
+    "test": "node --test --import tsx tests/*.test.ts"
   },
   "dependencies": {
     "js-yaml": "^4.1.1"

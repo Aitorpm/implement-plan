@@ -278,7 +278,7 @@ When new model versions are released, update this file — no recompile needed.
 ## CLI Reference
 
 ```
-implement-plan generate <description>         Generate a plan interactively
+implement-plan generate <description|file>    Generate a plan interactively
 implement-plan <plan.md> [options]            Execute an existing plan
 implement-plan validate <plan.md>             Validate plan structure
 implement-plan install-skill                  Install the /implement-plan Claude Code skill
