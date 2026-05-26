@@ -214,7 +214,17 @@ function buildGenerationPrompt(
   sections.push(
     `You are writing an implementation plan for the \`implement-plan\` orchestrator.\n\n` +
     `Output ONLY the markdown plan file — start with a # heading, include a one-sentence description, then the phases: YAML block. ` +
-    `No preamble. No code fences around the whole file. No commentary after.`
+    `No preamble. No code fences around the whole file. No commentary after.\n\n` +
+    `VERIFY COMMAND RULES:\n` +
+    `- For any phase that creates or modifies a database schema (Prisma, SQL, etc.), the verify command MUST include ` +
+    `field-presence checks alongside the build check. ` +
+    `Example: if the schema adds a field named \`threshold\`, the verify must include ` +
+    `\`grep -q "threshold" prisma/schema.prisma\`. This catches cases where an agent renames fields.\n` +
+    `- For any phase that adds constants to a shared constants file, include a grep check for the constant name.\n` +
+    `- For any phase that registers a new module, provider, or service in a module file, include a grep check ` +
+    `for the class name in that module file.\n` +
+    `These grep checks are critical — they are the only automated safeguard against an agent renaming or omitting ` +
+    `fields specified in the plan.`
   )
 
   if (projectDocs) {
@@ -245,7 +255,11 @@ function buildRevisionPrompt(
   sections.push(
     `You are revising an implementation plan for the \`implement-plan\` orchestrator.\n\n` +
     `Return the COMPLETE corrected markdown plan file only. Start with a # heading, include a short description, then a valid phases: YAML block. ` +
-    `Do not include preamble, explanations, code fences around the whole file, or commentary after the plan.`
+    `Do not include preamble, explanations, code fences around the whole file, or commentary after the plan.\n\n` +
+    `VERIFY COMMAND RULES:\n` +
+    `- Phases that create DB schema fields must include \`grep -q "fieldName" prisma/schema.prisma\` checks.\n` +
+    `- Phases that add constants must grep for the constant name in the constants file.\n` +
+    `- Phases that register new modules/providers/services must grep for the class name in the target module file.`
   )
 
   sections.push(`REVISION INSTRUCTIONS:\n${instruction}`)

@@ -4,7 +4,7 @@ import * as path from 'path'
 import { Phase, SerialPhase, ParallelPhase } from './plan-parser'
 import { ModelTier, ProviderResult } from './providers/types'
 import { ProviderRegistry } from './providers/registry'
-import { buildSerialPrompt, buildTeammatePrompt } from './prompt-builder'
+import { buildSerialPrompt, buildTeammatePrompt, buildReviewerPrompt } from './prompt-builder'
 import { loadProjectDocs, loadPhaseFiles } from './context-loader'
 import { selectModel } from './model-selector'
 import { selectProvider } from './provider-selector'
@@ -39,7 +39,7 @@ export async function runPhase(
   workDir: string,
   registry: ProviderRegistry,
   abortSignal: AbortSignal,
-  opts: { sequential?: boolean; dryRun?: boolean; phaseIndex?: number; totalPhases?: number; forcedProvider?: string }
+  opts: { sequential?: boolean; dryRun?: boolean; phaseIndex?: number; totalPhases?: number; forcedProvider?: string; priorPhaseFiles?: string }
 ): Promise<PhaseResult> {
   // Phase-scoped: clear rate limits from previous phase so Claude is tried first again
   registry.nextPhase()
@@ -48,7 +48,7 @@ export async function runPhase(
   let modelLabel: string
 
   if (!phase.model || phase.model === 'auto') {
-    const { model, score } = selectModel(phase)
+    const { model, score } = selectModel(phase, opts.priorPhaseFiles?.length ?? 0)
     tier = model
     modelLabel = `model: auto → ${tier} (score: ${score})`
   } else {
@@ -81,9 +81,9 @@ export async function runPhase(
   const allowedTools = phase.allowed_tools?.join(',') || DEFAULT_TOOLS
 
   if (phase.mode === 'serial') {
-    return runSerial(phase as SerialPhase, workDir, tier, allowedTools, timeoutMs, registry, abortSignal, opts, preferredProvider)
+    return runSerial(phase as SerialPhase, workDir, tier, allowedTools, timeoutMs, registry, abortSignal, { dryRun: opts.dryRun, priorPhaseFiles: opts.priorPhaseFiles }, preferredProvider)
   } else {
-    return runParallel(phase as ParallelPhase, workDir, tier, allowedTools, timeoutMs, registry, abortSignal, opts, preferredProvider)
+    return runParallel(phase as ParallelPhase, workDir, tier, allowedTools, timeoutMs, registry, abortSignal, { sequential: opts.sequential, dryRun: opts.dryRun, priorPhaseFiles: opts.priorPhaseFiles }, preferredProvider)
   }
 }
 
@@ -171,6 +171,74 @@ async function callWithFailover(
   }
 }
 
+function cleanWorkdir(workDir: string): void {
+  try {
+    execSync('git reset --hard HEAD', { cwd: workDir, stdio: 'pipe' })
+    execSync('git clean -fd', { cwd: workDir, stdio: 'pipe' })
+    console.log(`  ↺ Workdir reset to HEAD`)
+  } catch {
+    // Not a git repo or no commits yet — skip.
+  }
+}
+
+function getChangedFiles(workDir: string): string[] {
+  try {
+    const modified = execSync('git diff --name-only HEAD', { cwd: workDir, encoding: 'utf-8' }).trim()
+    const untracked = execSync('git ls-files --others --exclude-standard', { cwd: workDir, encoding: 'utf-8' }).trim()
+    return [...modified.split('\n'), ...untracked.split('\n')].filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+async function reviewPhaseOutput(
+  phase: SerialPhase,
+  workDir: string,
+  registry: ProviderRegistry,
+  abortSignal: AbortSignal,
+): Promise<{ passed: boolean; issues: string[] }> {
+  if (abortSignal.aborted) return { passed: true, issues: [] }
+
+  const reviewPath = path.join(workDir, '.phase-review.json')
+  if (fs.existsSync(reviewPath)) fs.unlinkSync(reviewPath)
+
+  const changedFiles = getChangedFiles(workDir)
+  const reviewFiles = [...new Set([
+    ...(phase.project_context_files ?? []),
+    ...changedFiles.filter(f => !f.startsWith('.')),
+  ])]
+
+  const prompt = buildReviewerPrompt(phase, reviewFiles)
+  console.log(`  🔍 Running spec-compliance review...`)
+
+  const result = await callWithFailover(
+    prompt,
+    'fast',
+    'Read,Glob,Write',
+    workDir,
+    120_000,
+    '  R │ ',
+    registry,
+    abortSignal,
+  )
+
+  if (result.subtype === 'cancelled') return { passed: true, issues: [] }
+
+  try {
+    if (fs.existsSync(reviewPath)) {
+      const data = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'))
+      return {
+        passed: Boolean(data.passed),
+        issues: Array.isArray(data.issues) ? (data.issues as string[]) : [],
+      }
+    }
+  } catch {}
+
+  // Reviewer didn't produce output — don't block progress
+  console.log(`  ⚠ Reviewer did not write .phase-review.json — skipping review`)
+  return { passed: true, issues: [] }
+}
+
 async function runSerial(
   phase: SerialPhase,
   workDir: string,
@@ -179,7 +247,7 @@ async function runSerial(
   timeoutMs: number,
   registry: ProviderRegistry,
   abortSignal: AbortSignal,
-  opts: { dryRun?: boolean },
+  opts: { dryRun?: boolean; priorPhaseFiles?: string },
   preferred?: string,
 ): Promise<PhaseResult> {
   const projectDocs = loadProjectDocs(workDir)
@@ -199,11 +267,13 @@ async function runSerial(
   let lastProviderUsed: string | undefined
 
   for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    if (attempt > 1) cleanWorkdir(workDir)
+
     const failureContext = attempt > 1
       ? `Attempt ${attempt - 1} failed.\nVerify output:\n${lastVerifyOutput}\nDo not repeat the same approach.`
       : undefined
 
-    const prompt = buildSerialPrompt(phase, projectDocs, currentFiles, failureContext)
+    const prompt = buildSerialPrompt(phase, projectDocs, currentFiles, failureContext, opts.priorPhaseFiles)
 
     if (opts.dryRun) {
       const providerName = preferred ?? registry.getAvailable()?.name ?? 'claude'
@@ -244,8 +314,20 @@ async function runSerial(
 
     const verify = captureVerify(phase.verify, workDir)
     if (verify.ok) {
+      const review = await reviewPhaseOutput(phase, workDir, registry, abortSignal)
+      if (!review.passed) {
+        if (attempt <= MAX_RETRIES) {
+          lastVerifyOutput = `Build passes but spec review found issues:\n${review.issues.map(i => `- ${i}`).join('\n')}`
+          console.log(`  ✗ Spec review found issues (will retry):`)
+          for (const issue of review.issues) console.log(`    - ${issue}`)
+          continue
+        }
+        console.log(`  ⚠ Spec review found issues (proceeding — max retries reached):`)
+        for (const issue of review.issues) console.log(`    - ${issue}`)
+      }
       commitPhaseFiles(workDir, phase.id, phase.name, allFilesWritten)
-      console.log(`  ✅ Phase ${phase.id} verified [${result.providerUsed}, ${result.costUsd > 0 ? `$${result.costUsd.toFixed(4)}` : 'no cost reported'}]`)
+      const reviewNote = !review.passed ? ' [review warnings]' : ''
+      console.log(`  ✅ Phase ${phase.id} verified [${result.providerUsed}, ${result.costUsd > 0 ? `$${result.costUsd.toFixed(4)}` : 'no cost reported'}]${reviewNote}`)
       return { phaseId: phase.id, success: true, costUsd: totalCost, filesWritten: allFilesWritten, attempts: attempt, providerUsed: lastProviderUsed }
     }
 
@@ -263,20 +345,27 @@ async function runSerial(
 }
 
 function commitPhaseFiles(workDir: string, phaseId: number, phaseName: string, files: string[]): void {
-  const uniqueFiles = [...new Set(files)].filter(file =>
-    file !== COMPLETION_FILE &&
-    file !== '.implement-plan-progress.json' &&
-    !file.startsWith('.worktrees/'),
-  )
-  if (uniqueFiles.length === 0) return
-
   try {
-    execSync(`git add -- ${uniqueFiles.map(shellQuote).join(' ')}`, { cwd: workDir, stdio: 'inherit' })
+    // Stage tracked files first (from tool_use events), then fall back to git add -A
+    // to catch files created via Bash commands (e.g. prisma migrate, sed, echo).
+    const uniqueFiles = [...new Set(files)].filter(file =>
+      file !== COMPLETION_FILE &&
+      file !== '.implement-plan-progress.json' &&
+      !file.startsWith('.worktrees/'),
+    )
+    if (uniqueFiles.length > 0) {
+      execSync(`git add -- ${uniqueFiles.map(shellQuote).join(' ')}`, { cwd: workDir, stdio: 'pipe' })
+    }
+    execSync('git add -A', { cwd: workDir, stdio: 'pipe' })
+
     const staged = execSync('git diff --cached --name-only', { cwd: workDir, encoding: 'utf-8' }).trim()
-    if (!staged) return
+    if (!staged) {
+      console.log(`  ⚠ Phase ${phaseId} produced no file changes — check that the implementation wrote output`)
+      return
+    }
     execSync(`git commit -m ${shellQuote(`phase ${phaseId}: ${phaseName}`)}`, { cwd: workDir, stdio: 'inherit' })
   } catch {
-    // Not a git repo, or commit failed because there were no changes to stage.
+    // Not a git repo, or commit failed — non-fatal.
   }
 }
 
@@ -288,7 +377,7 @@ async function runParallel(
   timeoutMs: number,
   registry: ProviderRegistry,
   abortSignal: AbortSignal,
-  opts: { sequential?: boolean; dryRun?: boolean },
+  opts: { sequential?: boolean; dryRun?: boolean; priorPhaseFiles?: string },
   preferred?: string,
 ): Promise<PhaseResult> {
   const filesA = new Set(phase.teammate_A.files ?? [])
@@ -347,8 +436,8 @@ async function runParallel(
 
       const currentFilesA = loadPhaseFiles(workDir, phase.teammate_A.files)
       const currentFilesB = loadPhaseFiles(workDir, phase.teammate_B.files)
-      const promptA = buildTeammatePrompt(phase.teammate_A, phase.id, projectDocs, currentFilesA, failureContextA)
-      const promptB = buildTeammatePrompt(phase.teammate_B, phase.id, projectDocs, currentFilesB, failureContextB)
+      const promptA = buildTeammatePrompt(phase.teammate_A, phase.id, projectDocs, currentFilesA, failureContextA, opts.priorPhaseFiles)
+      const promptB = buildTeammatePrompt(phase.teammate_B, phase.id, projectDocs, currentFilesB, failureContextB, opts.priorPhaseFiles)
 
       const completionPathA = path.join(wtDirA, COMPLETION_FILE)
       const completionPathB = path.join(wtDirB, COMPLETION_FILE)
@@ -398,9 +487,14 @@ async function runParallel(
       ]
 
       if (copiedFiles.length > 0) {
-        execSync(`git add -- ${copiedFiles.map(shellQuote).join(' ')}`, { cwd: workDir, stdio: 'inherit' })
+        execSync(`git add -- ${copiedFiles.map(shellQuote).join(' ')}`, { cwd: workDir, stdio: 'pipe' })
       }
-      execSync(`git commit -m "phase ${phase.id}: ${phase.name}"`, { cwd: workDir, stdio: 'inherit' })
+      const parallelStaged = execSync('git diff --cached --name-only', { cwd: workDir, encoding: 'utf-8' }).trim()
+      if (!parallelStaged) {
+        console.log(`  ⚠ Phase ${phase.id} parallel merge: no files staged — check that teammates wrote output`)
+      } else {
+        execSync(`git commit -m ${shellQuote(`phase ${phase.id}: ${phase.name}`)}`, { cwd: workDir, stdio: 'inherit' })
+      }
 
       const verify = captureVerify(phase.post_parallel_verify, workDir)
       if (verify.ok) {

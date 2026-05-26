@@ -17,14 +17,25 @@ function looksLikeShellCommand(cmd: string): boolean {
   return /^(test|grep|ls|cat|echo|pnpm|npm|npx|yarn|bun|node|python|python3|go|cargo|make|bash|sh|git|tsc|vitest|jest|pytest|find|curl|mkdir|cp|mv|rm|chmod|\.|\/|\$)/.test(firstWord)
 }
 
+const WIRING_PATTERN = /register\s+(in|with|to)\b|\bwire\s+(up|in|into)\b|\binject\s+into\b|export\s+from\b|add\s+.*\bto\s+.*\bmodule\b|add\s+.*\bprovider\b|import\s+.*\bmodule\b/i
+
 function validateSerialPhase(phase: SerialPhase): ValidationResult {
   const errors: string[] = []
   const warnings: string[] = []
 
   if (!phase.tasks?.length) {
     errors.push(`Phase ${phase.id}: 'tasks' is empty or missing`)
-  } else if (phase.tasks.length > 8) {
-    warnings.push(`Phase ${phase.id}: ${phase.tasks.length} tasks — consider splitting (>8 risks hitting turn limit)`)
+  } else {
+    if (phase.tasks.length > 8) {
+      warnings.push(`Phase ${phase.id}: ${phase.tasks.length} tasks — consider splitting (>8 risks hitting turn limit)`)
+    }
+    const wiringTasks = phase.tasks.filter(t => WIRING_PATTERN.test(t))
+    const nonWiringTasks = phase.tasks.length - wiringTasks.length
+    if (wiringTasks.length > 0 && nonWiringTasks > 4) {
+      warnings.push(
+        `Phase ${phase.id}: has ${wiringTasks.length} integration/wiring task(s) mixed with ${nonWiringTasks} implementation tasks — agents often skip wiring when overloaded. Consider a dedicated wiring phase.`
+      )
+    }
   }
 
   if (!phase.verify?.length) {
@@ -62,6 +73,32 @@ function validateParallelPhase(phase: ParallelPhase): ValidationResult {
     const tasksB = phase.teammate_B.tasks?.length ?? 0
     if (tasksA > 8) warnings.push(`Phase ${phase.id} teammate_A: ${tasksA} tasks — consider splitting`)
     if (tasksB > 8) warnings.push(`Phase ${phase.id} teammate_B: ${tasksB} tasks — consider splitting`)
+
+    const fileCountA = phase.teammate_A.files?.length ?? 0
+    const fileCountB = phase.teammate_B.files?.length ?? 0
+    if (fileCountA > 6) {
+      warnings.push(
+        `Phase ${phase.id} teammate_A: owns ${fileCountA} files — consider splitting (>6 files risks agents skipping wiring tasks)`
+      )
+    }
+    if (fileCountB > 6) {
+      warnings.push(
+        `Phase ${phase.id} teammate_B: owns ${fileCountB} files — consider splitting (>6 files risks agents skipping wiring tasks)`
+      )
+    }
+
+    const wiringTasksA = (phase.teammate_A.tasks ?? []).filter(t => WIRING_PATTERN.test(t))
+    const wiringTasksB = (phase.teammate_B.tasks ?? []).filter(t => WIRING_PATTERN.test(t))
+    if (wiringTasksA.length > 0 && (phase.teammate_A.tasks?.length ?? 0) - wiringTasksA.length > 4) {
+      warnings.push(
+        `Phase ${phase.id} teammate_A: ${wiringTasksA.length} wiring task(s) mixed with heavy implementation — consider a dedicated wiring phase`
+      )
+    }
+    if (wiringTasksB.length > 0 && (phase.teammate_B.tasks?.length ?? 0) - wiringTasksB.length > 4) {
+      warnings.push(
+        `Phase ${phase.id} teammate_B: ${wiringTasksB.length} wiring task(s) mixed with heavy implementation — consider a dedicated wiring phase`
+      )
+    }
   }
 
   if (!phase.post_parallel_verify?.length) {

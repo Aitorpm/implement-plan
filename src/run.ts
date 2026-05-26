@@ -13,6 +13,7 @@ import { ProviderRegistry } from './providers/registry'
 import { ModelTier } from './providers/types'
 import { generatePlan, revisePlan, toSlug } from './plan-generator'
 import { resolveGenerateInput } from './cli-input'
+import { loadPriorPhaseFiles } from './context-loader'
 
 interface ModelConfig {
   claude?: Partial<Record<ModelTier, string>>
@@ -382,6 +383,11 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
 
   const start = Date.now()
   let totalCost = progress.results.reduce((s, r) => s + r.costUsd, 0)
+  // Accumulated list of every file changed across all completed phases. Priority-sorted
+  // when read, so schema/constants/types always surface to the top regardless of which
+  // phase produced them.
+  const allPriorChangedFiles: string[] = []
+  let priorPhaseFiles: string | undefined
 
   for (const [index, phase] of phases.entries()) {
     const result = await runPhase(phase, workDir, registry, abortController.signal, {
@@ -390,6 +396,7 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
       phaseIndex: index + 1,
       totalPhases: phases.length,
       forcedProvider: opts.provider,
+      priorPhaseFiles,
     })
     progress.results.push(result)
     totalCost += result.costUsd
@@ -400,6 +407,26 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
       if (!opts.dryRun) fs.writeFileSync(progressPath, JSON.stringify(progress, null, 2))
       console.error(`\nResume with: implement-plan ${planPath} --from-phase=${phase.id}`)
       process.exit(1)
+    }
+
+    // After each phase, accumulate all changed files (tool-tracked + git) so every
+    // subsequent phase sees the complete real output of every prior phase.
+    if (!opts.dryRun) {
+      try {
+        const gitChanged = execSync('git diff --name-only HEAD~1 HEAD 2>/dev/null || true', {
+          cwd: workDir, encoding: 'utf-8',
+        }).trim().split('\n').filter(Boolean)
+        for (const f of [...result.filesWritten, ...gitChanged]) {
+          if (!allPriorChangedFiles.includes(f)) allPriorChangedFiles.push(f)
+        }
+      } catch {
+        for (const f of result.filesWritten) {
+          if (!allPriorChangedFiles.includes(f)) allPriorChangedFiles.push(f)
+        }
+      }
+      if (allPriorChangedFiles.length > 0) {
+        priorPhaseFiles = loadPriorPhaseFiles(workDir, allPriorChangedFiles)
+      }
     }
 
     progress.completedPhases.push(phase.id)

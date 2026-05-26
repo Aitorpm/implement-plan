@@ -9,14 +9,21 @@ const HAIKU_KEYWORDS = [
 const SONNET_KEYWORDS = [
   'implement', 'algorithm', 'calculate', 'pure function', 'spec', 'test',
   'service', 'engine', 'state machine', 'edge case', 'handle error',
-  'interface', 'type guard', 'middleware',
+  'interface', 'type guard', 'middleware', 'streaming', 'complex',
+]
+
+// AI/agent work — these warrant Opus
+const OPUS_KEYWORDS = [
+  'agent', 'orchestrat', 'multi-agent', 'ai tool', 'tool call',
+  'function call', 'llm', 'embedding', 'vector store',
 ]
 
 const TEST_SUITE_PATTERNS = ['vitest', 'jest', 'pytest', 'go test', 'pnpm test', 'npm test']
 
 const COMPLEX_FILE_PATTERNS = ['.spec.ts', '.test.ts', 'engine.ts', 'service.ts', '.spec.js', '.test.js']
+const OPUS_FILE_PATTERNS = ['.agent.ts', '.agent.js', '.tool.ts', '.tool.js']
 
-export function selectModel(phase: Phase): { model: ModelTier; score: number } {
+export function selectModel(phase: Phase, priorContextChars = 0): { model: ModelTier; score: number } {
   let score = 0
 
   const allTasks = phase.mode === 'serial'
@@ -35,12 +42,12 @@ export function selectModel(phase: Phase): { model: ModelTier; score: number } {
         ...(phase as ParallelPhase).teammate_A.files,
         ...(phase as ParallelPhase).teammate_B.files,
       ]
-    : []
+    : ((phase as SerialPhase).project_context_files ?? [])
 
   const taskText = allTasks.join(' ').toLowerCase()
   const verifyText = allVerify.join(' ').toLowerCase()
 
-  // Haiku signals
+  // Haiku signals (mechanical tasks pull score down)
   for (const kw of HAIKU_KEYWORDS) {
     if (taskText.includes(kw)) score -= 1
   }
@@ -58,6 +65,23 @@ export function selectModel(phase: Phase): { model: ModelTier; score: number } {
     if (allFiles.some(f => f.endsWith(pattern))) score += 1
   }
 
-  const model: ModelTier = score >= 3 ? 'standard' : 'fast'
+  // Opus signals (AI/agent orchestration work)
+  for (const kw of OPUS_KEYWORDS) {
+    if (taskText.includes(kw)) score += 4
+  }
+  for (const pattern of OPUS_FILE_PATTERNS) {
+    if (allFiles.some(f => f.endsWith(pattern))) score += 4
+  }
+
+  // Hard floor: 7+ tasks always warrant at least Sonnet
+  if (allTasks.length >= 7) score = Math.max(score, 3)
+
+  // Prior-phase context size: large prompts degrade Haiku quality more than Sonnet/Opus.
+  // Any phase receiving meaningful prior context gets a minimum Sonnet floor.
+  // Very large context (>25k chars) also boosts score toward Opus for complex phases.
+  if (priorContextChars > 8_000) score = Math.max(score, 3)
+  if (priorContextChars > 25_000) score += 3
+
+  const model: ModelTier = score >= 8 ? 'powerful' : score >= 3 ? 'standard' : 'fast'
   return { model, score }
 }
