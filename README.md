@@ -95,7 +95,7 @@ npm install && npm run build && npm link
 cd ~/my-project
 ```
 
-The tool runs agents in the context of the current directory, reads your `CLAUDE.md` for project conventions, and verifies changes with your project's actual build/test commands.
+The tool runs agents in the context of the current directory, reads your `CLAUDE.md` and/or `AGENTS.md` for project conventions, and verifies changes with your project's actual build/test commands.
 
 ---
 
