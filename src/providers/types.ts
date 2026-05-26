@@ -9,8 +9,11 @@ export interface ProviderResult {
   numTurns: number
   hasCompletionFile: boolean
   filesWritten: string[]
+  assistantText?: string
   error?: string
 }
+
+export type ProviderProgress = (message: string) => void
 
 export interface Provider {
   readonly name: string
@@ -27,6 +30,6 @@ export interface Provider {
     bare?: boolean,
   ): ChildProcess
 
-  parseStream(proc: ChildProcess, prefix: string, workDir: string): Promise<ProviderResult>
+  parseStream(proc: ChildProcess, prefix: string, workDir: string, onProgress?: ProviderProgress): Promise<ProviderResult>
   detectRateLimit(stderr: string, result: ProviderResult): boolean
 }

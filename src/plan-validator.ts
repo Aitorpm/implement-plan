@@ -2,6 +2,7 @@ import { Phase, SerialPhase, ParallelPhase, parsePlan } from './plan-parser'
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
+import { preflightVerifyCommands } from './verify-preflight'
 
 interface ValidationResult {
   errors: string[]
@@ -70,7 +71,13 @@ function validateParallelPhase(phase: ParallelPhase): ValidationResult {
   return { errors, warnings }
 }
 
-export function validatePlan(planPath: string, workDir: string): { ok: boolean } {
+export interface PlanValidationSummary {
+  ok: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+export function validatePlan(planPath: string, workDir: string): PlanValidationSummary {
   console.log(`\nValidating: ${path.basename(planPath)}`)
 
   let phases: Phase[]
@@ -78,9 +85,10 @@ export function validatePlan(planPath: string, workDir: string): { ok: boolean }
     phases = parsePlan(planPath)
     console.log(`  ✅ YAML parses cleanly — ${phases.length} phase${phases.length === 1 ? '' : 's'} found`)
   } catch (err: any) {
-    console.log(`  ❌ YAML parse error: ${err.message}`)
+    const msg = `YAML parse error: ${err.message}`
+    console.log(`  ❌ ${msg}`)
     console.log(`\nResult: 1 error. Fix before running.\n`)
-    return { ok: false }
+    return { ok: false, errors: [msg], warnings: [] }
   }
 
   const allErrors: string[] = []
@@ -145,6 +153,20 @@ export function validatePlan(planPath: string, workDir: string): { ok: boolean }
         console.log(`  ✅ Phase ${phase.id}: structure valid`)
       }
     }
+
+    const verifyCommands = phase.mode === 'serial'
+      ? ((phase as SerialPhase).verify ?? [])
+      : [
+          (phase as ParallelPhase).teammate_A?.verify,
+          (phase as ParallelPhase).teammate_B?.verify,
+          ...((phase as ParallelPhase).post_parallel_verify ?? []),
+        ].filter((cmd): cmd is string => Boolean(cmd))
+    const preflight = preflightVerifyCommands(verifyCommands)
+    if (!preflight.ok) {
+      const msg = `Phase ${phase.id}: ${preflight.output}`
+      console.log(`  ❌ ${msg}`)
+      allErrors.push(msg)
+    }
   }
 
   const ec = allErrors.length
@@ -160,5 +182,5 @@ export function validatePlan(planPath: string, workDir: string): { ok: boolean }
     console.log(`\nResult: ${parts}.${ec > 0 ? ' Fix errors before running.' : ''}\n`)
   }
 
-  return { ok: ec === 0 }
+  return { ok: ec === 0, errors: allErrors, warnings: allWarnings }
 }

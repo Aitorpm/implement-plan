@@ -3,15 +3,16 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as readline from 'readline'
-import { execSync, spawnSync } from 'child_process'
+import { execSync } from 'child_process'
 import { parsePlan } from './plan-parser'
 import { runPhase, PhaseResult, activeWorktrees } from './phase-runner'
-import { validatePlan } from './plan-validator'
+import { PlanValidationSummary, validatePlan } from './plan-validator'
 import { ClaudeProvider } from './providers/claude'
 import { CodexProvider } from './providers/codex'
 import { ProviderRegistry } from './providers/registry'
 import { ModelTier } from './providers/types'
-import { generatePlan, toSlug } from './plan-generator'
+import { generatePlan, revisePlan, toSlug } from './plan-generator'
+import { resolveGenerateInput } from './cli-input'
 
 interface ModelConfig {
   claude?: Partial<Record<ModelTier, string>>
@@ -154,9 +155,61 @@ function prompt(question: string): Promise<string> {
   })
 }
 
+function promptRaw(question: string): Promise<string> {
+  return new Promise(resolve => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(question, answer => {
+      rl.close()
+      resolve(answer.trim())
+    })
+  })
+}
+
+async function reviseSavedPlan(
+  planPath: string,
+  workDir: string,
+  registry: ProviderRegistry,
+  instruction: string,
+): Promise<void> {
+  const currentPlan = fs.readFileSync(planPath, 'utf-8')
+  const revised = await revisePlan(currentPlan, instruction, workDir, registry)
+  if (!revised.trim()) {
+    throw new Error('Plan revision produced no output')
+  }
+  fs.writeFileSync(planPath, revised, 'utf-8')
+}
+
+async function autoFixPlanUntilValid(
+  planPath: string,
+  workDir: string,
+  registry: ProviderRegistry,
+  initialValidation: PlanValidationSummary,
+): Promise<boolean> {
+  let validation = initialValidation
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const detail = [
+      ...validation.errors.map(e => `ERROR: ${e}`),
+      ...validation.warnings.map(w => `WARNING: ${w}`),
+    ].join('\n')
+    console.log(`  Auto-fixing plan validation issue${validation.errors.length === 1 ? '' : 's'} (attempt ${attempt}/3)...`)
+    await reviseSavedPlan(
+      planPath,
+      workDir,
+      registry,
+      `Fix these validation problems while preserving the user's intended feature scope. The corrected plan must pass implement-plan validate.\n${detail}`,
+    )
+
+    validation = validatePlan(planPath, workDir)
+    if (validation.ok) return true
+  }
+
+  return false
+}
+
 async function runGenerate(description: string, workDir: string, opts: ParsedArgs): Promise<void> {
-  if (!description.trim()) {
-    console.error('Error: provide a feature description.\nExample: implement-plan generate "build user auth with JWT"')
+  const input = resolveGenerateInput(description, workDir)
+  if (!input.description.trim()) {
+    console.error('Error: provide a feature description or a file path.\nExample: implement-plan generate "build user auth with JWT"\nExample: implement-plan generate ./feature-plan.md')
     process.exit(1)
   }
 
@@ -170,14 +223,18 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
   })
 
   if (opts.dryRun) {
-    console.log(`[DRY RUN] Would generate plan for: "${description}"`)
+    const source = input.source ? ` from file: ${input.source}` : ` for: "${input.description}"`
+    console.log(`[DRY RUN] Would generate plan${source}`)
     console.log(`[DRY RUN] Provider: ${registry.providers[0].name} (haiku)`)
     return
   }
 
   let planText: string
   try {
-    planText = await generatePlan(description, workDir, registry)
+    if (input.source) {
+      console.log(`  Reading plan request from ${input.source}`)
+    }
+    planText = await generatePlan(input.description, workDir, registry)
   } catch (err: any) {
     console.error(`\nGeneration failed: ${err.message}`)
     process.exit(1)
@@ -189,7 +246,7 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
   }
 
   // Save to ~/.claude/plans/<slug>.md
-  const slug = toSlug(description)
+  const slug = toSlug(input.slugSeed)
   const plansDir = path.join(os.homedir(), '.claude', 'plans')
   fs.mkdirSync(plansDir, { recursive: true })
   const planPath = path.join(plansDir, `${slug}.md`)
@@ -209,22 +266,39 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
 
   // Interactive review loop
   while (true) {
-    const answer = await prompt('\n[Y]es execute / [e]dit / [s]ave only / [a]bort: ')
+    const answer = await prompt('\n[Y]es execute / [r]evise with prompt / [s]ave only / [a]bort: ')
 
     if (answer === '' || answer === 'y' || answer === 'yes') {
       console.log()
-      const { ok } = validatePlan(planPath, workDir)
-      if (!ok) {
-        console.log('\nFix the errors above ([e]dit) before executing.')
-        continue
+      const validation = validatePlan(planPath, workDir)
+      if (!validation.ok) {
+        const fixed = await autoFixPlanUntilValid(planPath, workDir, registry, validation)
+        if (!fixed) {
+          console.log(`\nCould not auto-fix the generated plan after 3 attempts. Saved: ${planPath}`)
+          console.log(`Run when ready: implement-plan generate "${description}"`)
+          return
+        }
+        const updated = fs.readFileSync(planPath, 'utf-8')
+        console.log(`\n${divider}`)
+        console.log(updated)
+        console.log(divider)
+        console.log(`\nAuto-fixed: ${planPath}`)
       }
-      await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false })
+      try {
+        await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false })
+      } catch (err: any) {
+        console.error(err.message ?? err)
+        process.exit(1)
+      }
       return
     }
 
-    if (answer === 'e' || answer === 'edit') {
-      const editor = process.env.EDITOR || process.env.VISUAL || 'vi'
-      spawnSync(editor, [planPath], { stdio: 'inherit' })
+    if (answer === 'r' || answer === 'revise' || answer === 'e' || answer === 'edit') {
+      const instruction = await promptRaw('\nDescribe the plan change: ')
+      if (!instruction.trim()) {
+        continue
+      }
+      await reviseSavedPlan(planPath, workDir, registry, instruction)
       const updated = fs.readFileSync(planPath, 'utf-8')
       console.log(`\n${divider}`)
       console.log(updated)
@@ -309,10 +383,13 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
   const start = Date.now()
   let totalCost = progress.results.reduce((s, r) => s + r.costUsd, 0)
 
-  for (const phase of phases) {
+  for (const [index, phase] of phases.entries()) {
     const result = await runPhase(phase, workDir, registry, abortController.signal, {
       sequential: opts.sequential,
       dryRun: opts.dryRun,
+      phaseIndex: index + 1,
+      totalPhases: phases.length,
+      forcedProvider: opts.provider,
     })
     progress.results.push(result)
     totalCost += result.costUsd
@@ -358,7 +435,7 @@ function runInstallSkill(): void {
 }
 
 const USAGE = `Usage:
-  implement-plan generate <description>         Generate a plan interactively
+  implement-plan generate <description|file>    Generate a plan interactively
   implement-plan <plan.md> [options]            Execute an existing plan
   implement-plan validate <plan.md>             Validate plan structure
   implement-plan install-skill                  Install the /implement-plan Claude Code skill

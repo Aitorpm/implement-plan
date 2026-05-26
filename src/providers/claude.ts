@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from 'child_process'
 import { execSync } from 'child_process'
-import { Provider, ProviderResult, ModelTier } from './types'
+import { Provider, ProviderProgress, ProviderResult, ModelTier } from './types'
 
 export class ClaudeProvider implements Provider {
   readonly name = 'claude'
@@ -44,7 +44,7 @@ export class ClaudeProvider implements Provider {
     return spawn('claude', args, { cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'] })
   }
 
-  parseStream(proc: ChildProcess, prefix: string, _workDir: string): Promise<ProviderResult> {
+  parseStream(proc: ChildProcess, prefix: string, _workDir: string, onProgress?: ProviderProgress): Promise<ProviderResult> {
     return new Promise((resolve) => {
       let buffer = ''
       let lineBuffer = ''
@@ -57,6 +57,7 @@ export class ClaudeProvider implements Provider {
         numTurns: 0,
         hasCompletionFile: false,
         filesWritten: [],
+        assistantText: '',
       }
 
       proc.stderr?.on('data', (chunk: Buffer) => {
@@ -76,12 +77,14 @@ export class ClaudeProvider implements Provider {
           try {
             const event = JSON.parse(line)
             if (event.type === 'assistant') {
+              onProgress?.('assistant response received')
               const textContent = event.message?.content
                 ?.filter((c: any) => c.type === 'text')
                 .map((c: any) => c.text)
                 .join('')
               if (textContent?.trim()) {
-                process.stdout.write(`${prefix}${textContent.trim()}\n`)
+                if (prefix || !onProgress) process.stdout.write(`${prefix}${textContent.trim()}\n`)
+                result.assistantText += textContent
               }
             }
           } catch {
@@ -98,6 +101,7 @@ export class ClaudeProvider implements Provider {
             const event = JSON.parse(line)
 
             if (event.type === 'result') {
+              onProgress?.(`finished: ${event.subtype ?? 'unknown'}`)
               result.success = event.subtype === 'success'
               result.costUsd = event.total_cost_usd ?? 0
               result.numTurns = event.num_turns ?? 0
@@ -107,6 +111,7 @@ export class ClaudeProvider implements Provider {
             }
 
             if (event.type === 'tool_use' && (event.name === 'Write' || event.name === 'Edit')) {
+              onProgress?.(`${event.name} ${event.input?.file_path ?? ''}`.trim())
               const filePath = event.input?.file_path
               if (filePath) {
                 if (!result.filesWritten.includes(filePath)) result.filesWritten.push(filePath)
@@ -125,7 +130,7 @@ export class ClaudeProvider implements Provider {
   }
 
   detectRateLimit(stderr: string, result: ProviderResult): boolean {
-    const haystack = stderr + (result.error ?? '')
-    return /rate.?limit|too many requests|429|quota exceeded|throttl|concurrency limit|resource exhausted/i.test(haystack)
+    const haystack = stderr + (result.error ?? '') + (result.assistantText ?? '')
+    return /rate.?limit|session limit|not logged in|please run \/login|too many requests|429|quota exceeded|throttl|concurrency limit|resource exhausted/i.test(haystack)
   }
 }
