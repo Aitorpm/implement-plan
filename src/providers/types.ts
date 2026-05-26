@@ -1,6 +1,6 @@
 import { ChildProcess } from 'child_process'
 
-export type ModelTier = 'haiku' | 'sonnet' | 'opus'
+export type ModelTier = 'fast' | 'standard' | 'powerful'
 
 export interface ProviderResult {
   success: boolean
