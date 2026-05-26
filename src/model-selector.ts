@@ -1,6 +1,5 @@
 import { Phase, SerialPhase, ParallelPhase } from './plan-parser'
-
-export type SelectedModel = 'haiku' | 'sonnet'
+import { ModelTier } from './providers/types'
 
 const HAIKU_KEYWORDS = [
   'create file', 'add import', 'scaffold', 'generate', 'migrate',
@@ -17,7 +16,7 @@ const TEST_SUITE_PATTERNS = ['vitest', 'jest', 'pytest', 'go test', 'pnpm test',
 
 const COMPLEX_FILE_PATTERNS = ['.spec.ts', '.test.ts', 'engine.ts', 'service.ts', '.spec.js', '.test.js']
 
-export function selectModel(phase: Phase): { model: SelectedModel; score: number } {
+export function selectModel(phase: Phase): { model: ModelTier; score: number } {
   let score = 0
 
   const allTasks = phase.mode === 'serial'
@@ -59,6 +58,6 @@ export function selectModel(phase: Phase): { model: SelectedModel; score: number
     if (allFiles.some(f => f.endsWith(pattern))) score += 1
   }
 
-  const model: SelectedModel = score >= 3 ? 'sonnet' : 'haiku'
+  const model: ModelTier = score >= 3 ? 'sonnet' : 'haiku'
   return { model, score }
 }

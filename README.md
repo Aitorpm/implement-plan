@@ -1,6 +1,6 @@
 # implement-plan
 
-Autonomous plan orchestrator for Claude Code. Reads a YAML plan embedded in a markdown file and drives Claude Code headlessly through each phase, with self-verification and cost tracking.
+Autonomous plan orchestrator for Claude Code and OpenAI Codex. Reads a YAML plan embedded in a markdown file and drives agents headlessly through each phase, with self-verification, cost tracking, and automatic provider failover.
 
 ## Install
 
@@ -20,8 +20,11 @@ cd ~/my-project
 # Validate a plan before burning quota
 implement-plan validate ~/.claude/plans/my-feature.md
 
-# Execute
+# Execute (uses Claude as primary, Codex as automatic fallback)
 implement-plan ~/.claude/plans/my-feature.md
+
+# Force a specific provider first (still falls back on rate limit)
+implement-plan ~/.claude/plans/my-feature.md --provider=codex
 
 # Save quota (no parallel agents)
 implement-plan ~/.claude/plans/my-feature.md --sequential
@@ -35,13 +38,14 @@ implement-plan ~/.claude/plans/my-feature.md --from-phase=3
 
 ## How It Works
 
-1. **Pre-flight**: checks git is clean, `claude` is in PATH
-2. **Context injection**: reads `CLAUDE.md` from your project root and injects it into every agent prompt — agents automatically follow your project conventions
-3. **Phase execution**: spawns `claude` as a subprocess; you see agent output live in the terminal
-4. **Completion check**: agent must write `.phase-complete.json` before the orchestrator considers a phase done — no magic string scanning
-5. **Independent verify**: orchestrator runs verify commands itself after the agent reports done — two layers of bug protection
-6. **Progress**: saved to `.implement-plan-progress.json` after each phase; re-run resumes automatically
-7. **Cost reporting**: total USD and files written printed at the end
+1. **Pre-flight**: checks git is clean, detects installed providers (Claude Code and/or Codex)
+2. **Provider selection**: Claude is tried first each phase; if rate-limited, Codex takes over automatically
+3. **Context injection**: reads `CLAUDE.md` from your project root and injects it into every agent prompt — agents automatically follow your project conventions
+4. **Phase execution**: spawns the agent as a subprocess; you see output live in the terminal with a `│` prefix
+5. **Completion check**: agent must write `.phase-complete.json` before the orchestrator considers a phase done — no magic string scanning
+6. **Independent verify**: orchestrator runs verify commands itself after the agent reports done — two layers of bug protection
+7. **Progress**: saved to `.implement-plan-progress.json` after each phase; re-run resumes automatically
+8. **Cost reporting**: total USD (where reported) and files written printed at the end
 
 ## Plan File Format
 
@@ -115,14 +119,56 @@ Two agents work simultaneously on disjoint file sets:
 
 ## Model Selection
 
-| Model | Use for | Cost |
-|-------|---------|------|
-| `haiku` | Scaffolding, migrations, constants, file creation | ~$0.001/phase |
-| `sonnet` | Service logic, tests, algorithms | ~$0.01/phase |
-| `opus` | Complex design decisions (explicit only) | ~$0.05/phase |
-| `auto` | Omit the field — orchestrator picks haiku or sonnet | — |
+| Tier | Claude Code | OpenAI Codex | Use for |
+|------|-------------|--------------|---------|
+| `haiku` | `haiku` | `gpt-5.4-mini` | Scaffolding, migrations, constants, file creation |
+| `sonnet` | `sonnet` | `gpt-5.4` | Service logic, tests, algorithms |
+| `opus` | `opus` | `gpt-5.5` | Complex design decisions (explicit only) |
+| `auto` | orchestrator picks haiku or sonnet | same tier selection | — |
 
 On a €20/month plan, `auto` never selects opus. Use `--sequential` to avoid parallel quota burn.
+
+## Provider Configuration
+
+By default, Claude Code is the primary provider and Codex is the automatic fallback (used when Claude is rate-limited).
+
+**Force a specific provider** for a run:
+```bash
+implement-plan my-plan.md --provider=codex    # Codex first, Claude fallback
+implement-plan my-plan.md --provider=claude   # Claude only (no fallback if not found)
+```
+
+**Per-phase provider hints** in the plan YAML:
+```yaml
+- id: 2
+  name: "Complex Refactor"
+  provider: claude   # prefer Claude for this phase; falls back to Codex if rate-limited
+  model: sonnet
+  tasks: [...]
+```
+
+**Override model names** without recompiling — create `~/.implement-plan.json`:
+```json
+{
+  "claude": { "haiku": "haiku", "sonnet": "sonnet", "opus": "opus" },
+  "codex": { "haiku": "gpt-5.4-mini", "sonnet": "gpt-5.4", "opus": "gpt-5.5" },
+  "cooldownMinutes": 60
+}
+```
+When OpenAI or Anthropic releases new model versions, update this file — no reinstall needed.
+
+## Rate Limit Handling
+
+Failover is **phase-scoped, not session-sticky**:
+- Each new phase tries Claude first (rate-limit flags are cleared per phase)
+- If Claude is rate-limited mid-phase, Codex takes over for that phase's remaining attempts
+- The *next* phase tries Claude first again
+
+When **both providers are simultaneously rate-limited**, the orchestrator pauses and polls every 5 minutes:
+```
+⏳ Both providers rate-limited. Resuming at 14:30 (~12 min)...✓
+```
+Press Ctrl+C to abort the wait — worktrees are cleaned up safely via AbortController.
 
 ## When a Phase Fails
 
@@ -170,7 +216,18 @@ claude --version
 claude --help | grep -E "model|permission|budget|bare|turns|output"
 ```
 
-Flags to verify are still present: `--permission-mode bypassPermissions`, `--bare`, `--max-budget-usd`, `--output-format stream-json`, `--allowedTools`. If any are missing or renamed, update `callClaude()` in `src/phase-runner.ts`.
+Flags to verify are still present: `--permission-mode bypassPermissions`, `--bare`, `--max-budget-usd`, `--output-format stream-json`, `--allowedTools`. If any are missing or renamed, update `spawn()` in `src/providers/claude.ts`.
+
+### Check for Codex CLI changes
+
+After running `codex update` or reinstalling:
+
+```bash
+codex --version
+codex exec --help
+```
+
+Flags to verify: `--sandbox danger-full-access`, `--json`, `--ephemeral`, `-C`. If any are missing or renamed, update `spawn()` in `src/providers/codex.ts`.
 
 ### Check for new Claude models
 
@@ -178,7 +235,7 @@ Flags to verify are still present: `--permission-mode bypassPermissions`, `--bar
 claude --help | grep -i model
 ```
 
-When a new model tier is available (e.g. `sonnet-next`), add it to `MODEL_ALIAS` in `src/phase-runner.ts` and `VALID_MODELS` in `src/plan-validator.ts`.
+When a new model tier is available (e.g. `sonnet-next`), update the `modelMap` in `src/providers/claude.ts` and `VALID_MODELS` in `src/plan-validator.ts`. Or update it at runtime in `~/.implement-plan.json`.
 
 See `CLAUDE.md` for the full dependency policy and AI orchestration best practices.
 
@@ -189,9 +246,10 @@ implement-plan <plan.md> [options]    Execute a plan
 implement-plan validate <plan.md>     Check plan structure
 
 Options:
-  --sequential     Run parallel phases one at a time (saves quota)
-  --dry-run        Print prompts, don't call claude
-  --from-phase=N   Start from phase N
-  --dirty-ok       Skip git clean check
+  --sequential              Run parallel phases one at a time (saves quota)
+  --dry-run                 Print prompts, don't call claude
+  --from-phase=N            Start from phase N
+  --dirty-ok                Skip git clean check
+  --provider=claude|codex   Force a specific provider first (still falls back on rate limit)
   --restart        Ignore saved progress
 ```

@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 import * as path from 'path'
 import * as fs from 'fs'
+import * as os from 'os'
 import { execSync } from 'child_process'
 import { parsePlan } from './plan-parser'
 import { runPhase, PhaseResult, activeWorktrees } from './phase-runner'
 import { validatePlan } from './plan-validator'
+import { ClaudeProvider } from './providers/claude'
+import { CodexProvider } from './providers/codex'
+import { ProviderRegistry } from './providers/registry'
+import { ModelTier } from './providers/types'
+
+interface ModelConfig {
+  claude?: Partial<Record<ModelTier, string>>
+  codex?: Partial<Record<ModelTier, string>>
+  cooldownMinutes?: number
+}
 
 interface Progress {
   planPath: string
@@ -20,12 +31,15 @@ interface ParsedArgs {
   dirtyOk: boolean
   restart: boolean
   fromPhase: number
+  provider?: string
 }
 
 function parseArgs(args: string[]): ParsedArgs {
   const isValidate = args[0] === 'validate'
   const planArg = isValidate ? args[1] : args[0]
   const rest = isValidate ? args.slice(2) : args.slice(1)
+
+  const providerArg = rest.find(a => a.startsWith('--provider='))?.split('=')[1]
 
   return {
     subcommand: isValidate ? 'validate' : 'execute',
@@ -35,15 +49,49 @@ function parseArgs(args: string[]): ParsedArgs {
     dirtyOk: rest.includes('--dirty-ok'),
     restart: rest.includes('--restart'),
     fromPhase: parseInt(rest.find(a => a.startsWith('--from-phase='))?.split('=')[1] ?? '1'),
+    provider: providerArg,
   }
 }
 
-function checkClaudeInPath(): void {
-  try {
-    execSync('which claude', { stdio: 'ignore' })
-  } catch {
-    throw new Error("'claude' binary not found in PATH. Install Claude Code CLI first.")
+function loadUserConfig(workDir: string): ModelConfig {
+  const candidates = [
+    path.join(workDir, '.implement-plan.json'),
+    path.join(os.homedir(), '.implement-plan.json'),
+  ]
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      try {
+        return JSON.parse(fs.readFileSync(p, 'utf-8'))
+      } catch {
+        console.warn(`  ⚠ Could not parse config at ${p}`)
+      }
+    }
   }
+  return {}
+}
+
+function setupProviders(config: ModelConfig, forced?: string): ProviderRegistry {
+  const cooldownMs = (config.cooldownMinutes ?? 60) * 60 * 1000
+  const allProviders = [
+    new ClaudeProvider(config.claude),
+    new CodexProvider(config.codex),
+  ]
+
+  let ordered = allProviders.filter(p => p.isInstalled())
+
+  if (ordered.length === 0) {
+    throw new Error('No providers found. Install claude (Claude Code CLI) or codex (OpenAI Codex CLI).')
+  }
+
+  if (forced) {
+    const match = ordered.find(p => p.name === forced)
+    if (!match) {
+      throw new Error(`Provider '${forced}' not found in PATH. Install it first.`)
+    }
+    ordered = [match, ...ordered.filter(p => p.name !== forced)]
+  }
+
+  return new ProviderRegistry(ordered, cooldownMs)
 }
 
 function checkGitClean(workDir: string, dirtyOk: boolean): void {
@@ -54,7 +102,6 @@ function checkGitClean(workDir: string, dirtyOk: boolean): void {
     }
   } catch (err: any) {
     if (err.message?.includes('uncommitted')) throw err
-    // Not a git repo — warn only
     console.warn('  ⚠ Not a git repository — parallel phases will not work')
   }
 }
@@ -64,6 +111,13 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
     console.error(`Error: plan file not found: ${planPath}`)
     process.exit(1)
   }
+
+  const config = loadUserConfig(workDir)
+  const registry = setupProviders(config, opts.provider)
+
+  const providerLine = registry.providers.map((p, i) =>
+    i === 0 ? `${p.name} (primary)` : `${p.name} (fallback)`
+  ).join(' → ')
 
   const progressPath = path.join(workDir, '.implement-plan-progress.json')
 
@@ -80,7 +134,6 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
   }
 
   if (!opts.dryRun) {
-    checkClaudeInPath()
     checkGitClean(workDir, opts.dirtyOk)
   }
 
@@ -96,14 +149,31 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
 
   console.log(`📋 ${planPath}`)
   console.log(`📁 ${workDir}`)
+  console.log(`Providers: ${providerLine}`)
   const flags = [opts.sequential && 'sequential', opts.dryRun && 'dry-run'].filter(Boolean)
   console.log(`Running phases: ${phases.map(p => p.id).join(', ')}${flags.length ? ` (${flags.join(', ')})` : ''}\n`)
+
+  const abortController = new AbortController()
+
+  process.on('SIGINT', () => {
+    abortController.abort()
+    if (activeWorktrees.size > 0) {
+      console.log('\n⚠ Interrupted — cleaning up worktrees...')
+      for (const wt of activeWorktrees) {
+        try { execSync(`git worktree remove "${wt}" --force`, { cwd: workDir }) } catch {}
+      }
+    }
+    process.exit(130)
+  })
 
   const start = Date.now()
   let totalCost = progress.results.reduce((s, r) => s + r.costUsd, 0)
 
   for (const phase of phases) {
-    const result = await runPhase(phase, workDir, { sequential: opts.sequential, dryRun: opts.dryRun })
+    const result = await runPhase(phase, workDir, registry, abortController.signal, {
+      sequential: opts.sequential,
+      dryRun: opts.dryRun,
+    })
     progress.results.push(result)
     totalCost += result.costUsd
 
@@ -135,11 +205,12 @@ const USAGE = `Usage:
   implement-plan validate <plan.md>         Validate plan structure
 
 Options:
-  --sequential     Run parallel phases serially (saves quota)
-  --dry-run        Print prompts without calling claude
-  --from-phase=N   Start from phase N (resume after crash)
-  --dirty-ok       Skip git clean check
-  --restart        Ignore existing progress file`
+  --sequential          Run parallel phases serially (saves quota)
+  --dry-run             Print prompts without calling claude
+  --from-phase=N        Start from phase N (resume after crash)
+  --dirty-ok            Skip git clean check
+  --restart             Ignore existing progress file
+  --provider=claude|codex  Force a specific provider first (still falls back on rate limit)`
 
 async function main() {
   const args = process.argv.slice(2)
@@ -151,17 +222,6 @@ async function main() {
 
   const opts = parseArgs(args)
   const workDir = process.cwd()
-
-  // Register SIGINT cleanup for parallel worktrees
-  process.on('SIGINT', () => {
-    if (activeWorktrees.size > 0) {
-      console.log('\n⚠ Interrupted — cleaning up worktrees...')
-      for (const wt of activeWorktrees) {
-        try { execSync(`git worktree remove "${wt}" --force`, { cwd: workDir }) } catch {}
-      }
-    }
-    process.exit(130)
-  })
 
   if (opts.subcommand === 'validate') {
     const { ok } = validatePlan(opts.planPath, workDir)

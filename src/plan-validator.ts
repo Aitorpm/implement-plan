@@ -9,6 +9,7 @@ interface ValidationResult {
 }
 
 const VALID_MODELS = new Set(['haiku', 'sonnet', 'opus', 'auto'])
+const VALID_PROVIDERS = new Set(['claude', 'codex'])
 
 function looksLikeShellCommand(cmd: string): boolean {
   const firstWord = cmd.trim().split(/\s+/)[0]
@@ -111,6 +112,15 @@ export function validatePlan(planPath: string, workDir: string): { ok: boolean }
       allErrors.push(msg)
     } else {
       console.log(`  ✅ Phase ${phase.id}: model valid (${phase.model ?? 'auto'})`)
+    }
+
+    // Provider validation
+    if (phase.provider && !VALID_PROVIDERS.has(phase.provider)) {
+      const msg = `Phase ${phase.id}: invalid provider '${phase.provider}' — must be claude or codex`
+      console.log(`  ❌ ${msg}`)
+      allErrors.push(msg)
+    } else if (phase.provider) {
+      console.log(`  ✅ Phase ${phase.id}: provider hint set to '${phase.provider}'`)
     }
 
     const { errors, warnings } = phase.mode === 'serial'

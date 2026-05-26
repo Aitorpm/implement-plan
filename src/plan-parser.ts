@@ -2,12 +2,14 @@ import * as yaml from 'js-yaml'
 import * as fs from 'fs'
 
 export type ModelName = 'haiku' | 'sonnet' | 'opus' | 'auto'
+export type ProviderName = 'claude' | 'codex'
 
 export interface BasePhase {
   id: number
   name: string
   mode: 'serial' | 'parallel'
   model?: ModelName
+  provider?: ProviderName
   allowed_tools?: string[]
   timeout_minutes?: number
 }

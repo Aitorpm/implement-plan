@@ -6,14 +6,19 @@ This is a TypeScript CLI tool that orchestrates Claude Code agents to execute mu
 
 ```
 src/
-  run.ts            CLI entry — parses args, registers SIGINT, dispatches to execute or validate
-  plan-parser.ts    Extracts phases: YAML block from markdown, returns typed Phase[]
-  plan-validator.ts Structural validation without execution — the `validate` subcommand
-  stream-parser.ts  Parses --output-format stream-json events from a ChildProcess, tees to terminal
-  phase-runner.ts   Executes serial and parallel phases; manages git worktrees
-  prompt-builder.ts Builds agent prompts with context injection and completion-via-file rule
-  context-loader.ts Reads CLAUDE.md and source files from target project to inject into prompts
-  model-selector.ts Scores phase complexity to auto-select haiku vs sonnet
+  run.ts              CLI entry — parses args, registers SIGINT, dispatches to execute or validate
+  plan-parser.ts      Extracts phases: YAML block from markdown, returns typed Phase[]
+  plan-validator.ts   Structural validation without execution — the `validate` subcommand
+  stream-parser.ts    Re-exports from providers/ for backwards compatibility
+  phase-runner.ts     Executes serial and parallel phases; manages git worktrees; provider failover
+  prompt-builder.ts   Builds agent prompts with context injection and completion-via-file rule
+  context-loader.ts   Reads CLAUDE.md and source files from target project to inject into prompts
+  model-selector.ts   Scores phase complexity to auto-select haiku vs sonnet (returns ModelTier)
+  providers/
+    types.ts          Provider interface, ModelTier, ProviderResult
+    claude.ts         Claude Code provider — stream-json parsing, spawn flags
+    codex.ts          OpenAI Codex provider — JSONL parsing, git diff for filesWritten
+    registry.ts       Phase-scoped + session rate limit tracking, waitForAvailable()
 ```
 
 ## Key Invariants
@@ -32,7 +37,50 @@ Add to `src/plan-validator.ts` in `validateSerialPhase` or `validateParallelPhas
 
 ## Adding a New Model
 
-Add the alias to `MODEL_ALIAS` in `src/phase-runner.ts`, to `VALID_MODELS` in `src/plan-validator.ts`, and to the `ModelName` union in `src/plan-parser.ts`. Use the short model alias (e.g. `'haiku'`, `'sonnet-next'`), not a full model ID — Claude Code resolves aliases to the current latest version of that tier. Full IDs are only needed when pinning to a specific snapshot for reproducibility.
+Add the alias to `modelMap` in the relevant provider class (`src/providers/claude.ts` or `src/providers/codex.ts`), to `VALID_MODELS` in `src/plan-validator.ts`, and to the `ModelName` union in `src/plan-parser.ts`. Use the short model alias (e.g. `'haiku'`, `'sonnet-next'`), not a full model ID — Claude Code resolves aliases to the current latest version of that tier. Full IDs are only needed when pinning to a specific snapshot for reproducibility.
+
+Users can also override model maps at runtime via `~/.implement-plan.json` — no recompile needed:
+```json
+{
+  "codex": { "sonnet": "gpt-5.5" },
+  "claude": { "opus": "claude-opus-4-8" }
+}
+```
+
+## Provider System
+
+The tool supports Claude Code (`claude`) and OpenAI Codex (`codex`) as interchangeable backends.
+
+**Failover is phase-scoped, not session-sticky**: at the start of each phase, `registry.nextPhase()` clears per-phase rate-limit flags so Claude is tried first again. If Claude is rate-limited mid-phase, Codex takes over for that phase. The next phase tries Claude first again. This is the standard pattern from production AI orchestrators.
+
+**When both providers are simultaneously exhausted**: `waitForAvailable(abortSignal)` pauses and polls every 5 minutes, printing `⏳ Both providers rate-limited. Resuming at HH:MM (~N min)`. SIGINT during the wait is honored via AbortController.
+
+### Adding a New Provider
+
+1. Create `src/providers/<name>.ts` implementing the `Provider` interface from `types.ts`
+2. Implement `isInstalled()`, `spawn()`, `parseStream()`, `detectRateLimit()`
+3. Add the class to `setupProviders()` in `src/run.ts`
+4. Add the provider name to `VALID_PROVIDERS` in `src/plan-validator.ts`
+5. Add to the `ProviderName` union in `src/plan-parser.ts`
+
+### Rate Limit Detection
+
+The regex used in both providers to detect rate limiting:
+```
+/rate.?limit|too many requests|429|quota exceeded|throttl|concurrency limit|resource exhausted/i
+```
+Apply this to `stderr + result.error` in `detectRateLimit()`.
+
+### Codex-specific Notes
+
+Codex CLI flags: `codex exec -m <model> --sandbox danger-full-access --json --ephemeral -C <workDir> <prompt>`
+- `--json`: JSONL structured output — one JSON object per line
+- `--ephemeral`: no session persistence between phases
+- `-C`: sets working directory
+- `--sandbox danger-full-access`: allows filesystem writes (required for file creation tasks)
+- No `--allowedTools` equivalent — filesystem isolation comes from the worktree directory itself
+- No per-invocation cost reporting — `costUsd` is always 0 in `ProviderResult`
+- `filesWritten` is derived from `git diff --name-only HEAD` after the process closes
 
 ## Stream-JSON Event Format
 
@@ -99,7 +147,7 @@ Run `claude --version` and `claude --help` after any `claude` CLI update. These 
 ```bash
 claude --help | grep -E "model|permission|budget|bare|turns|output"
 ```
-If any flag we use is gone or renamed, update `callClaude()` in `src/phase-runner.ts`.
+If any flag we use is gone or renamed, update `spawn()` in `src/providers/claude.ts`.
 
 ### Model names — never hardcode full IDs
 

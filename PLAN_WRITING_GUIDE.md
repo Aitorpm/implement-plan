@@ -145,3 +145,22 @@ Do NOT use for every file in the project — only files directly relevant to the
 5. Context cites file paths, not prose descriptions
 6. No phase has more than 8 tasks
 7. Git working tree is clean in the target project
+
+
+---
+
+## Provider Hints
+
+Add `provider: claude` or `provider: codex` to a phase when you have a reason to prefer one backend.
+
+By default, Claude is primary and Codex is the automatic fallback. You only need `provider:` when task type matters more than availability.
+
+| Use `provider: claude` | Use `provider: codex` |
+|------------------------|----------------------|
+| Complex multi-file refactors requiring deep reasoning | Terminal-native tasks (shell scripts, git ops, CLI tooling) |
+| SWE-bench style tasks — adapting existing patterns precisely | Parallelization-heavy phases where speed matters more than nuance |
+| Tasks where understanding codebase conventions is critical | Mechanical, high-volume file generation tasks |
+
+**Benchmark context** (May 2026): Codex (GPT-5.5) leads on terminal-native tasks (82.7% Terminal-Bench vs Claude's 69.4%). Claude Opus leads on complex refactors (SWE-bench Pro: 64.3% vs Codex's 58.6%). For most tasks (`auto` model selection), the difference is small — use provider hints only when the gap matters.
+
+`provider:` is a **hint**, not a hard requirement. If the preferred provider is rate-limited, the orchestrator falls back automatically.
