@@ -8,9 +8,9 @@ export class ClaudeProvider implements Provider {
 
   constructor(overrides?: Partial<Record<ModelTier, string>>) {
     this.modelMap = {
-      haiku: overrides?.haiku ?? 'haiku',
-      sonnet: overrides?.sonnet ?? 'sonnet',
-      opus: overrides?.opus ?? 'opus',
+      fast: overrides?.fast ?? 'haiku',
+      standard: overrides?.standard ?? 'sonnet',
+      powerful: overrides?.powerful ?? 'opus',
     }
   }
 
@@ -34,6 +34,7 @@ export class ClaudeProvider implements Provider {
       '-p', prompt,
       '--model', model,
       '--output-format', 'stream-json',
+      '--verbose',
       '--permission-mode', 'bypassPermissions',
       '--allowedTools', allowedTools,
       '--max-budget-usd', String(budgetUsd.toFixed(2)),

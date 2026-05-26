@@ -45,7 +45,7 @@ export async function runPhase(
     tier = model
     modelLabel = `model: auto → ${tier} (score: ${score})`
   } else {
-    tier = phase.model === 'opus' ? 'opus' : phase.model === 'sonnet' ? 'sonnet' : 'haiku'
+    tier = phase.model === 'opus' ? 'powerful' : phase.model === 'sonnet' ? 'standard' : 'fast'
     modelLabel = phase.model
   }
 

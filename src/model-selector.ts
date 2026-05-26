@@ -58,6 +58,6 @@ export function selectModel(phase: Phase): { model: ModelTier; score: number } {
     if (allFiles.some(f => f.endsWith(pattern))) score += 1
   }
 
-  const model: ModelTier = score >= 3 ? 'sonnet' : 'haiku'
+  const model: ModelTier = score >= 3 ? 'standard' : 'fast'
   return { model, score }
 }

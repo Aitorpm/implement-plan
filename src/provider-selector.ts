@@ -58,8 +58,8 @@ export function selectProvider(
   if (TEST_SUITE_PATTERNS.some(p => verifyText.includes(p))) score -= 2
 
   // Model tier as weak corroborating signal
-  if (resolvedTier === 'haiku') score += 1      // mechanical → Codex
-  if (resolvedTier === 'sonnet' || resolvedTier === 'opus') score -= 1  // reasoning → Claude
+  if (resolvedTier === 'fast') score += 1       // mechanical → Codex
+  if (resolvedTier === 'standard' || resolvedTier === 'powerful') score -= 1  // reasoning → Claude
 
   const provider: ProviderPreference =
     score >= 3 ? 'codex' :

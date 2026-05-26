@@ -22,9 +22,9 @@ export async function generatePlan(
 
   const prompt = buildGenerationPrompt(description, projectDocs, guideContent, templateContent)
 
-  console.log(`  Generating plan with ${provider.name} (haiku)...`)
+  console.log(`  Generating plan with ${provider.name} (fast)...`)
 
-  const model = provider.modelMap['haiku']
+  const model = provider.modelMap['fast']
   const proc = provider.spawn(prompt, model, 'Read', workDir, GENERATION_BUDGET_USD)
 
   return new Promise((resolve, reject) => {

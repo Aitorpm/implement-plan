@@ -11,9 +11,9 @@ export class CodexProvider implements Provider {
 
   constructor(overrides?: Partial<Record<ModelTier, string>>) {
     this.modelMap = {
-      haiku: overrides?.haiku ?? 'gpt-5.4-mini',
-      sonnet: overrides?.sonnet ?? 'gpt-5.4',
-      opus: overrides?.opus ?? 'gpt-5.5',
+      fast: overrides?.fast ?? 'gpt-5.4-mini',
+      standard: overrides?.standard ?? 'gpt-5.4',
+      powerful: overrides?.powerful ?? 'gpt-5.5',
     }
   }
 
