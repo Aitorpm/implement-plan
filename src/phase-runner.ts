@@ -7,6 +7,7 @@ import { ProviderRegistry } from './providers/registry'
 import { buildSerialPrompt, buildTeammatePrompt } from './prompt-builder'
 import { loadProjectDocs, loadPhaseFiles } from './context-loader'
 import { selectModel } from './model-selector'
+import { selectProvider } from './provider-selector'
 
 const MAX_RETRIES = 2
 const COMPLETION_FILE = '.phase-complete.json'
@@ -37,19 +38,36 @@ export async function runPhase(
   registry.nextPhase()
 
   let tier: ModelTier
+  let modelLabel: string
 
   if (!phase.model || phase.model === 'auto') {
     const { model, score } = selectModel(phase)
     tier = model
-    console.log(`\n▶ Phase ${phase.id}: ${phase.name} [${phase.mode}] [model: auto → ${tier} (score: ${score})]`)
+    modelLabel = `model: auto → ${tier} (score: ${score})`
   } else {
     tier = phase.model === 'opus' ? 'opus' : phase.model === 'sonnet' ? 'sonnet' : 'haiku'
-    console.log(`\n▶ Phase ${phase.id}: ${phase.name} [${phase.mode}] [${phase.model}]`)
+    modelLabel = phase.model
   }
+
+  // Provider selection: explicit YAML hint wins; otherwise auto-select by task signals
+  let preferredProvider: string | undefined
+  let providerLabel: string
+
+  if (phase.provider) {
+    preferredProvider = phase.provider
+    providerLabel = `provider: explicit → ${phase.provider}`
+  } else {
+    const { provider, score } = selectProvider(phase, tier)
+    preferredProvider = provider ?? undefined
+    providerLabel = provider
+      ? `provider: auto → ${provider} (score: ${score})`
+      : `provider: auto → default`
+  }
+
+  console.log(`\n▶ Phase ${phase.id}: ${phase.name} [${phase.mode}] [${modelLabel}] [${providerLabel}]`)
 
   const timeoutMs = (phase.timeout_minutes ?? 15) * 60 * 1000
   const allowedTools = phase.allowed_tools?.join(',') || DEFAULT_TOOLS
-  const preferredProvider = phase.provider
 
   if (phase.mode === 'serial') {
     return runSerial(phase as SerialPhase, workDir, tier, allowedTools, timeoutMs, registry, abortSignal, opts, preferredProvider)

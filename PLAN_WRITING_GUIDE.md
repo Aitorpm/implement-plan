@@ -149,18 +149,27 @@ Do NOT use for every file in the project — only files directly relevant to the
 
 ---
 
-## Provider Hints
+## Provider Routing
 
-Add `provider: claude` or `provider: codex` to a phase when you have a reason to prefer one backend.
+The orchestrator **automatically routes each phase to the best provider** based on task signals — you don't need to set `provider:` manually in most cases.
 
-By default, Claude is primary and Codex is the automatic fallback. You only need `provider:` when task type matters more than availability.
+| Signal in tasks | Auto-selected provider |
+|-----------------|----------------------|
+| bash / shell / script / git / scaffold / migrate / create file | Codex |
+| implement / refactor / algorithm / service / edge case / state machine | Claude |
+| Test suites in verify (vitest, jest, pytest) | Claude |
+| No strong signal | Registry default order (Claude first) |
 
-| Use `provider: claude` | Use `provider: codex` |
-|------------------------|----------------------|
-| Complex multi-file refactors requiring deep reasoning | Terminal-native tasks (shell scripts, git ops, CLI tooling) |
-| SWE-bench style tasks — adapting existing patterns precisely | Parallelization-heavy phases where speed matters more than nuance |
-| Tasks where understanding codebase conventions is critical | Mechanical, high-volume file generation tasks |
+**Benchmark basis** (May 2026): Codex (GPT-5.5) scores 82.7% Terminal-Bench vs Claude's 69.4% — better for terminal-native and mechanical tasks. Claude scores 64.3% SWE-bench Pro vs Codex's 58.6% — better for complex reasoning and refactors.
 
-**Benchmark context** (May 2026): Codex (GPT-5.5) leads on terminal-native tasks (82.7% Terminal-Bench vs Claude's 69.4%). Claude Opus leads on complex refactors (SWE-bench Pro: 64.3% vs Codex's 58.6%). For most tasks (`auto` model selection), the difference is small — use provider hints only when the gap matters.
+**Override with `provider:`** only when the auto-routing gets it wrong — for example, to force Claude on a shell-heavy phase that also requires careful reasoning about existing code:
 
-`provider:` is a **hint**, not a hard requirement. If the preferred provider is rate-limited, the orchestrator falls back automatically.
+```yaml
+- id: 3
+  name: "Custom migration with business logic"
+  provider: claude   # auto would pick codex (migrate keyword), but this needs reasoning
+  tasks:
+    - Migrate legacy pricing rules to the new schema, preserving edge cases from src/billing/legacy.ts
+```
+
+`provider:` is a preference, not a hard requirement. If the preferred provider is rate-limited, the other takes over automatically.
