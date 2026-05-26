@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as readline from 'readline'
 import { execSync } from 'child_process'
-import { parsePlan } from './plan-parser'
+import { parsePlan, Phase } from './plan-parser'
 import { runPhase, PhaseResult, activeWorktrees } from './phase-runner'
 import { PlanValidationSummary, validatePlan } from './plan-validator'
 import { ClaudeProvider } from './providers/claude'
@@ -14,6 +14,7 @@ import { ModelTier } from './providers/types'
 import { generatePlan, revisePlan, toSlug } from './plan-generator'
 import { resolveGenerateInput } from './cli-input'
 import { loadPriorPhaseFiles } from './context-loader'
+import { selectModel } from './model-selector'
 
 interface ModelConfig {
   claude?: Partial<Record<ModelTier, string>>
@@ -321,6 +322,41 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
   }
 }
 
+function printPlanSummary(phases: Phase[]): void {
+  const TIER_LABEL: Record<string, string> = { fast: 'haiku', standard: 'sonnet', powerful: 'opus' }
+
+  const rows = phases.map(p => {
+    const agentCount = p.mode === 'parallel' ? 2 : 1
+    const modelLabel = (p.model && p.model !== 'auto')
+      ? p.model
+      : `~${TIER_LABEL[selectModel(p, 0).model]}`
+    const teammates = p.mode === 'parallel'
+      ? `  A: ${(p as any).teammate_A.name} · B: ${(p as any).teammate_B.name}`
+      : ''
+    return { id: String(p.id), name: p.name, mode: p.mode, model: modelLabel, agents: String(agentCount), teammates }
+  })
+
+  const colW = {
+    id: Math.max(1, ...rows.map(r => r.id.length)),
+    name: Math.max(4, ...rows.map(r => r.name.length)),
+    mode: 8,
+    model: Math.max(5, ...rows.map(r => r.model.length)),
+    agents: 6,
+  }
+
+  const divider = '  ' + '─'.repeat(colW.id + colW.name + colW.mode + colW.model + colW.agents + 12)
+
+  console.log(`\n  ${'#'.padEnd(colW.id)}  ${'Name'.padEnd(colW.name)}  ${'Mode'.padEnd(colW.mode)}  ${'Model'.padEnd(colW.model)}  Agents`)
+  console.log(divider)
+  for (const r of rows) {
+    console.log(`  ${r.id.padEnd(colW.id)}  ${r.name.padEnd(colW.name)}  ${r.mode.padEnd(colW.mode)}  ${r.model.padEnd(colW.model)}  ${r.agents}${r.teammates}`)
+  }
+  console.log(divider)
+
+  const totalAgents = rows.reduce((s, r) => s + Number(r.agents), 0)
+  console.log(`  ${phases.length} phase${phases.length === 1 ? '' : 's'} · ${totalAgents} agent${totalAgents === 1 ? '' : 's'} total\n`)
+}
+
 async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): Promise<void> {
   if (!planPath || !fs.existsSync(planPath)) {
     console.error(`Error: plan file not found: ${planPath}`)
@@ -366,7 +402,8 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
   console.log(`📁 ${workDir}`)
   console.log(`Providers: ${providerLine}`)
   const flags = [opts.sequential && 'sequential', opts.dryRun && 'dry-run'].filter(Boolean)
-  console.log(`Running phases: ${phases.map(p => p.id).join(', ')}${flags.length ? ` (${flags.join(', ')})` : ''}\n`)
+  if (flags.length) console.log(`Flags: ${flags.join(', ')}`)
+  printPlanSummary(phases)
 
   const abortController = new AbortController()
 
@@ -408,6 +445,12 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
       console.error(`\nResume with: implement-plan ${planPath} --from-phase=${phase.id}`)
       process.exit(1)
     }
+
+    const doneCount = index + 1
+    const elapsedS = Math.round((Date.now() - start) / 1000)
+    const elapsedStr = elapsedS >= 60 ? `${Math.floor(elapsedS / 60)}m ${elapsedS % 60}s` : `${elapsedS}s`
+    const costStr = totalCost > 0 ? ` · $${totalCost.toFixed(4)}` : ''
+    console.log(`  ── ${doneCount} / ${phases.length} phases done${costStr} · ${elapsedStr}`)
 
     // After each phase, accumulate all changed files (tool-tracked + git) so every
     // subsequent phase sees the complete real output of every prior phase.
