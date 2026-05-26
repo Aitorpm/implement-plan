@@ -127,7 +127,9 @@ Then from any Claude Code session in your project:
 /implement-plan build a user auth system with JWT and refresh tokens
 ```
 
-Claude generates the plan via CLI, reviews it with you in chat, then executes it. The generation and execution always go through the CLI — not the chat session — so provider failover works even if Claude is rate-limited mid-review.
+The CLI generates the plan (using Claude or Codex, whichever is available), reviews it with you in chat, then executes it. Generation and execution always go through the CLI — not the chat session — so provider failover applies even if a provider is rate-limited mid-review.
+
+> Note: `/implement-plan` is a Claude Code skill. Codex has no equivalent slash-command system, but the underlying CLI (`implement-plan generate`) works with both providers directly from the terminal.
 
 ---
 

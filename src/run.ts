@@ -354,6 +354,7 @@ function runInstallSkill(): void {
 
   console.log(`✅ Skill installed: ${dest}`)
   console.log(`   Use /implement-plan <description> in any Claude Code session`)
+  console.log(`   (Codex users: run 'implement-plan generate <description>' directly from the terminal)`)
 }
 
 const USAGE = `Usage:
