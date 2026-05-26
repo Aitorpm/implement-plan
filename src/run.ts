@@ -86,7 +86,7 @@ function parseArgs(args: string[]): ParsedArgs {
     dryRun: rest.includes('--dry-run'),
     dirtyOk: rest.includes('--dirty-ok'),
     restart: rest.includes('--restart'),
-    fromPhase: parseInt(rest.find(a => a.startsWith('--from-phase='))?.split('=')[1] ?? '1'),
+    fromPhase: (parseInt(rest.find(a => a.startsWith('--from-phase='))?.split('=')[1] ?? '1', 10) || 1),
     provider: providerArg,
   }
 }

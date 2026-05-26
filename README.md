@@ -4,6 +4,55 @@ Autonomous plan orchestrator for Claude Code and OpenAI Codex. Describe a featur
 
 ---
 
+## How It Works
+
+```
+  implement-plan generate "build user auth with JWT"
+          │
+          ▼
+  ┌───────────────────────┐
+  │  AI writes plan YAML  │  ← claude or codex (haiku, cheap)
+  └───────────┬───────────┘
+              │  [Y]es execute / [e]dit / [s]ave only / [a]bort
+              ▼
+  ┌───────────────────────┐
+  │   validate structure  │  ← catches overlaps, missing verify cmds
+  └───────────┬───────────┘
+              │
+    ┌─────────▼──────────────────────────────────────┐
+    │               phase loop                        │
+    │  (progress saved after each phase — resumable)  │
+    │                                                  │
+    │   serial phase          parallel phase           │
+    │   ┌─────────────┐      ┌───────────────────┐    │
+    │   │  one agent  │      │  agent A ║ agent B │    │
+    │   │             │      │  (separate git     │    │
+    │   │  inner loop │      │   worktrees,       │    │
+    │   │  ┌────────┐ │      │   disjoint files)  │    │
+    │   │  │run task│ │      └────────┬──────────┘    │
+    │   │  │verify  │ │               │ merge + commit │
+    │   │  │fix     │ │               │ post_verify    │
+    │   │  │verify… │ │               │                │
+    │   │  └───┬────┘ │               │                │
+    │   │      │ write .phase-complete.json             │
+    │   │      │ orchestrator re-verifies independently │
+    │   │      │                                        │
+    │   │   pass? ──No──► retry (up to 3×,              │
+    │   │      │          error output injected)        │
+    │   └──────┼──────┘                                 │
+    └──────────┼─────────────────────────────────────── ┘
+               │
+  ┌────────────▼────────────┐
+  │  ✅ all phases complete  │
+  │  cost / files / time    │
+  └─────────────────────────┘
+
+  provider failover (transparent, per phase):
+  claude rate-limited? → codex takes over → next phase tries claude first again
+```
+
+---
+
 ## Step 1 — Install
 
 ```bash

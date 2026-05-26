@@ -12,7 +12,7 @@ src/
   stream-parser.ts    Re-exports from providers/ for backwards compatibility
   phase-runner.ts     Executes serial and parallel phases; manages git worktrees; provider failover
   prompt-builder.ts   Builds agent prompts with context injection and completion-via-file rule
-  context-loader.ts   Reads CLAUDE.md and source files from target project to inject into prompts
+  context-loader.ts   Reads CLAUDE.md / AGENTS.md and source files from target project to inject into prompts
   model-selector.ts     Scores phase complexity to auto-select haiku vs sonnet (returns ModelTier)
   provider-selector.ts  Scores phase task signals to auto-select claude vs codex per phase
   providers/

@@ -86,14 +86,16 @@ export function validatePlan(planPath: string, workDir: string): { ok: boolean }
   const allErrors: string[] = []
   const allWarnings: string[] = []
 
-  // Check claude in PATH
-  try {
-    execSync('which claude', { stdio: 'ignore' })
-    console.log(`  ✅ claude binary found in PATH`)
-  } catch {
-    const msg = `'claude' binary not found in PATH — install Claude Code CLI`
+  // Check at least one provider in PATH
+  const hasClaude = (() => { try { execSync('which claude', { stdio: 'ignore' }); return true } catch { return false } })()
+  const hasCodex = (() => { try { execSync('which codex', { stdio: 'ignore' }); return true } catch { return false } })()
+  if (!hasClaude && !hasCodex) {
+    const msg = `No AI provider found in PATH — install Claude Code CLI ('claude') or OpenAI Codex CLI ('codex')`
     console.log(`  ❌ ${msg}`)
     allErrors.push(msg)
+  } else {
+    const found = [hasClaude && 'claude', hasCodex && 'codex'].filter(Boolean).join(', ')
+    console.log(`  ✅ Provider(s) found in PATH: ${found}`)
   }
 
   // Check git repo (needed for parallel phases)

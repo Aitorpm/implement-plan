@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 export function loadProjectDocs(workDir: string): string {
-  const candidates = ['CLAUDE.md', '.claude/CLAUDE.md']
+  const candidates = ['CLAUDE.md', '.claude/CLAUDE.md', 'AGENTS.md', '.codex/AGENTS.md']
   const parts: string[] = []
 
   for (const candidate of candidates) {

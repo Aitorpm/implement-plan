@@ -57,7 +57,7 @@ export function parsePlan(filePath: string): Phase[] {
   }
 
   const yamlBlock = lines.slice(startIdx, endIdx).join('\n')
-  const parsed = yaml.load(yamlBlock) as { phases: Phase[] }
+  const parsed = yaml.load(yamlBlock, { schema: yaml.DEFAULT_SCHEMA }) as { phases: Phase[] }
 
   if (!parsed?.phases || !Array.isArray(parsed.phases)) {
     throw new Error(`Invalid plan: 'phases' must be an array`)

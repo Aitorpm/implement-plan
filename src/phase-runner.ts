@@ -87,45 +87,56 @@ async function callWithFailover(
   abortSignal: AbortSignal,
   preferred?: string,
 ): Promise<ProviderResult & { providerUsed: string; subtype: string }> {
-  if (registry.allRateLimited()) {
-    await registry.waitForAvailable(abortSignal)
+  const timedOutProviders = new Set<string>()
+
+  while (true) {
+    if (registry.allRateLimited()) {
+      // If every exhausted provider timed out (not quota-limited), fail fast instead of waiting
+      if (registry.providers.every(p => timedOutProviders.has(p.name))) {
+        return { success: false, rateLimited: false, costUsd: 0, numTurns: 0, hasCompletionFile: false, filesWritten: [], providerUsed: 'none', subtype: 'timeout', error: 'All providers timed out' }
+      }
+      await registry.waitForAvailable(abortSignal)
+    }
+
+    if (abortSignal.aborted) {
+      return { success: false, rateLimited: false, costUsd: 0, numTurns: 0, hasCompletionFile: false, filesWritten: [], providerUsed: 'none', subtype: 'cancelled' }
+    }
+
+    const provider = registry.getAvailable(preferred)
+    if (!provider) {
+      return { success: false, rateLimited: true, costUsd: 0, numTurns: 0, hasCompletionFile: false, filesWritten: [], providerUsed: 'none', subtype: 'rate_limited', error: 'No provider available' }
+    }
+
+    const model = provider.modelMap[tier]
+    const budgetUsd = (timeoutMs / 60000 / 15) * DEFAULT_BUDGET_USD
+
+    let timedOut = false
+    const proc = provider.spawn(prompt, model, allowedTools, workDir, budgetUsd)
+
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true
+      proc.kill('SIGTERM')
+    }, timeoutMs)
+
+    const result = await provider.parseStream(proc, prefix, workDir)
+    clearTimeout(timeoutHandle)
+
+    if (timedOut) {
+      timedOutProviders.add(provider.name)
+      console.log(`  ⚠ ${provider.name} timed out — trying next provider for this phase`)
+      registry.markRateLimitedForPhase(provider.name)
+      continue
+    }
+
+    if (result.rateLimited) {
+      console.log(`  ⚠ ${provider.name} rate-limited — trying next provider for this phase`)
+      registry.markRateLimitedForPhase(provider.name)
+      continue
+    }
+
+    const subtype = result.success ? 'success' : (result.error ?? 'error_during_execution')
+    return { ...result, subtype, providerUsed: provider.name }
   }
-
-  if (abortSignal.aborted) {
-    return { success: false, rateLimited: false, costUsd: 0, numTurns: 0, hasCompletionFile: false, filesWritten: [], providerUsed: 'none', subtype: 'cancelled' }
-  }
-
-  const provider = registry.getAvailable(preferred)
-  if (!provider) {
-    return { success: false, rateLimited: true, costUsd: 0, numTurns: 0, hasCompletionFile: false, filesWritten: [], providerUsed: 'none', subtype: 'rate_limited', error: 'No provider available' }
-  }
-
-  const model = provider.modelMap[tier]
-  const budgetUsd = (timeoutMs / 60000 / 15) * DEFAULT_BUDGET_USD
-
-  let timedOut = false
-  const proc = provider.spawn(prompt, model, allowedTools, workDir, budgetUsd)
-
-  const timeoutHandle = setTimeout(() => {
-    timedOut = true
-    proc.kill('SIGTERM')
-  }, timeoutMs)
-
-  const result = await provider.parseStream(proc, prefix, workDir)
-  clearTimeout(timeoutHandle)
-
-  if (timedOut) {
-    return { ...result, success: false, subtype: 'timeout', providerUsed: provider.name }
-  }
-
-  if (result.rateLimited) {
-    console.log(`  ⚠ ${provider.name} rate-limited — trying next provider for this phase`)
-    registry.markRateLimitedForPhase(provider.name)
-    return callWithFailover(prompt, tier, allowedTools, workDir, timeoutMs, prefix, registry, abortSignal, preferred)
-  }
-
-  const subtype = result.success ? 'success' : (result.error ?? 'error_during_execution')
-  return { ...result, subtype, providerUsed: provider.name }
 }
 
 async function runSerial(
@@ -237,57 +248,78 @@ async function runParallel(
 
   const projectDocs = loadProjectDocs(workDir)
 
-  if (!opts.dryRun) {
+  if (opts.dryRun) {
+    const providerName = preferred ?? registry.getAvailable()?.name ?? 'claude'
+    console.log(`[DRY RUN] Would spawn two ${providerName} processes in parallel`)
+    return { phaseId: phase.id, success: true, costUsd: 0, filesWritten: [], attempts: 1, providerUsed: providerName }
+  }
+
+  let totalCost = 0
+  const allFilesWritten: string[] = []
+  let lastVerifyOutputA = ''
+  let lastVerifyOutputB = ''
+  let lastProviders = ''
+
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
     fs.mkdirSync(wtBase, { recursive: true })
     execSync(`git worktree add -b "${branchA}" "${wtDirA}"`, { cwd: workDir, stdio: 'inherit' })
     activeWorktrees.add(wtDirA)
     execSync(`git worktree add -b "${branchB}" "${wtDirB}"`, { cwd: workDir, stdio: 'inherit' })
     activeWorktrees.add(wtDirB)
-  }
 
-  try {
-    const currentFilesA = loadPhaseFiles(workDir, phase.teammate_A.files)
-    const currentFilesB = loadPhaseFiles(workDir, phase.teammate_B.files)
-    const promptA = buildTeammatePrompt(phase.teammate_A, phase.id, projectDocs, currentFilesA)
-    const promptB = buildTeammatePrompt(phase.teammate_B, phase.id, projectDocs, currentFilesB)
+    try {
+      const failureContextA = attempt > 1 && lastVerifyOutputA
+        ? `Attempt ${attempt - 1} failed.\nVerify output:\n${lastVerifyOutputA}\nDo not repeat the same approach.`
+        : undefined
+      const failureContextB = attempt > 1 && lastVerifyOutputB
+        ? `Attempt ${attempt - 1} failed.\nVerify output:\n${lastVerifyOutputB}\nDo not repeat the same approach.`
+        : undefined
 
-    const completionPathA = path.join(wtDirA, COMPLETION_FILE)
-    const completionPathB = path.join(wtDirB, COMPLETION_FILE)
+      const currentFilesA = loadPhaseFiles(workDir, phase.teammate_A.files)
+      const currentFilesB = loadPhaseFiles(workDir, phase.teammate_B.files)
+      const promptA = buildTeammatePrompt(phase.teammate_A, phase.id, projectDocs, currentFilesA, failureContextA)
+      const promptB = buildTeammatePrompt(phase.teammate_B, phase.id, projectDocs, currentFilesB, failureContextB)
 
-    if (!opts.dryRun) {
-      if (fs.existsSync(completionPathA)) fs.unlinkSync(completionPathA)
-      if (fs.existsSync(completionPathB)) fs.unlinkSync(completionPathB)
-    }
+      const completionPathA = path.join(wtDirA, COMPLETION_FILE)
+      const completionPathB = path.join(wtDirB, COMPLETION_FILE)
 
-    let resultA: ProviderResult & { providerUsed: string; subtype: string }
-    let resultB: ProviderResult & { providerUsed: string; subtype: string }
+      let resultA: ProviderResult & { providerUsed: string; subtype: string }
+      let resultB: ProviderResult & { providerUsed: string; subtype: string }
 
-    if (opts.dryRun) {
-      const providerName = preferred ?? registry.getAvailable()?.name ?? 'claude'
-      console.log(`[DRY RUN] Would spawn two ${providerName} processes in parallel`)
-      const stub = { success: true, rateLimited: false, costUsd: 0, numTurns: 0, hasCompletionFile: true, filesWritten: [], providerUsed: providerName, subtype: 'success' }
-      resultA = resultB = stub
-    } else if (opts.sequential) {
-      console.log(`  [teammate_A: ${phase.teammate_A.name}]`)
-      resultA = await callWithFailover(promptA, tier, allowedTools, wtDirA, timeoutMs, '  A │ ', registry, abortSignal, preferred)
-      console.log(`  [teammate_B: ${phase.teammate_B.name}]`)
-      resultB = await callWithFailover(promptB, tier, allowedTools, wtDirB, timeoutMs, '  B │ ', registry, abortSignal, preferred)
-    } else {
-      console.log(`  [spawning ${phase.teammate_A.name} and ${phase.teammate_B.name} in parallel]`)
-      ;[resultA, resultB] = await Promise.all([
-        callWithFailover(promptA, tier, allowedTools, wtDirA, timeoutMs, '  A │ ', registry, abortSignal, preferred),
-        callWithFailover(promptB, tier, allowedTools, wtDirB, timeoutMs, '  B │ ', registry, abortSignal, preferred),
-      ])
-    }
+      if (opts.sequential) {
+        console.log(`  [teammate_A: ${phase.teammate_A.name}]`)
+        resultA = await callWithFailover(promptA, tier, allowedTools, wtDirA, timeoutMs, '  A │ ', registry, abortSignal, preferred)
+        console.log(`  [teammate_B: ${phase.teammate_B.name}]`)
+        resultB = await callWithFailover(promptB, tier, allowedTools, wtDirB, timeoutMs, '  B │ ', registry, abortSignal, preferred)
+      } else {
+        console.log(`  [spawning ${phase.teammate_A.name} and ${phase.teammate_B.name} in parallel]`)
+        ;[resultA, resultB] = await Promise.all([
+          callWithFailover(promptA, tier, allowedTools, wtDirA, timeoutMs, '  A │ ', registry, abortSignal, preferred),
+          callWithFailover(promptB, tier, allowedTools, wtDirB, timeoutMs, '  B │ ', registry, abortSignal, preferred),
+        ])
+      }
 
-    const totalCost = resultA.costUsd + resultB.costUsd
+      totalCost += resultA.costUsd + resultB.costUsd
+      for (const f of [...resultA.filesWritten, ...resultB.filesWritten]) {
+        if (!allFilesWritten.includes(f)) allFilesWritten.push(f)
+      }
+      lastProviders = [...new Set([resultA.providerUsed, resultB.providerUsed])].join('+')
 
-    if (!opts.dryRun) {
+      console.log(`  Attempt ${attempt} [${lastProviders}]: A=${resultA.subtype}, B=${resultB.subtype}`)
+
       const doneA = readCompletion(completionPathA, phase.id)
       const doneB = readCompletion(completionPathB, phase.id)
-      const missing = [!doneA && 'teammate_A', !doneB && 'teammate_B'].filter(Boolean)
-      if (missing.length > 0) {
-        return { phaseId: phase.id, success: false, costUsd: totalCost, filesWritten: [], attempts: 1, error: `${missing.join(', ')} did not write ${COMPLETION_FILE}` }
+
+      if (!doneA || !doneB) {
+        const missing = [!doneA && `teammate_A (${resultA.subtype})`, !doneB && `teammate_B (${resultB.subtype})`].filter(Boolean)
+        const errMsg = `${missing.join(', ')} did not write ${COMPLETION_FILE}`
+        console.log(`  ✗ ${errMsg}`)
+        lastVerifyOutputA = !doneA ? `Agent did not produce a completion file (${resultA.subtype})` : ''
+        lastVerifyOutputB = !doneB ? `Agent did not produce a completion file (${resultB.subtype})` : ''
+        if (attempt > MAX_RETRIES) {
+          return { phaseId: phase.id, success: false, costUsd: totalCost, filesWritten: allFilesWritten, attempts: attempt, providerUsed: lastProviders, error: errMsg }
+        }
+        continue
       }
 
       copyFiles(wtDirA, workDir, phase.teammate_A.files)
@@ -297,18 +329,20 @@ async function runParallel(
       execSync(`git commit -m "phase ${phase.id}: ${phase.name}"`, { cwd: workDir, stdio: 'inherit' })
 
       const verify = captureVerify(phase.post_parallel_verify, workDir)
-      if (!verify.ok) {
-        return { phaseId: phase.id, success: false, costUsd: totalCost, filesWritten: [], attempts: 1, error: `Post-parallel verify failed:\n${verify.output}` }
+      if (verify.ok) {
+        console.log(`  ✅ Phase ${phase.id} merged and verified [${lastProviders}]`)
+        return { phaseId: phase.id, success: true, costUsd: totalCost, filesWritten: allFilesWritten, attempts: attempt, providerUsed: lastProviders }
       }
-    }
 
-    const filesWritten = [...resultA.filesWritten, ...resultB.filesWritten]
-    const providers = [...new Set([resultA.providerUsed, resultB.providerUsed])].join('+')
-    console.log(`  ✅ Phase ${phase.id} merged and verified [${providers}]`)
-    return { phaseId: phase.id, success: true, costUsd: totalCost, filesWritten, attempts: 1, providerUsed: providers }
+      // Post-parallel verify failed — both teammates get the same error context for next retry
+      lastVerifyOutputA = verify.output
+      lastVerifyOutputB = verify.output
+      console.log(`  ✗ Post-parallel verify failed:\n${verify.output.split('\n').map(l => `    ${l}`).join('\n')}`)
+      if (attempt > MAX_RETRIES) {
+        return { phaseId: phase.id, success: false, costUsd: totalCost, filesWritten: allFilesWritten, attempts: attempt, providerUsed: lastProviders, error: `Post-parallel verify failed:\n${verify.output}` }
+      }
 
-  } finally {
-    if (!opts.dryRun) {
+    } finally {
       for (const [wt, branch] of [[wtDirA, branchA], [wtDirB, branchB]] as [string, string][]) {
         try {
           execSync(`git worktree remove "${wt}" --force`, { cwd: workDir })
@@ -320,6 +354,8 @@ async function runParallel(
       }
     }
   }
+
+  return { phaseId: phase.id, success: false, costUsd: totalCost, filesWritten: allFilesWritten, attempts: MAX_RETRIES + 1, providerUsed: lastProviders, error: 'Exhausted retries' }
 }
 
 function readCompletion(filePath: string, phaseId: number): { verified: boolean; summary: string } | null {
