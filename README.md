@@ -11,7 +11,27 @@ npm install && npm run build && npm link
 
 `implement-plan` is now available globally.
 
-## Usage
+## Guided Mode (Recommended)
+
+Describe what you want to build — the tool generates a plan, lets you review it, and executes it:
+
+```bash
+cd ~/my-project
+implement-plan generate "build a user auth system with JWT and refresh tokens"
+```
+
+The tool calls Claude (or Codex as fallback) to write the YAML plan, shows it to you, then walks through validation and execution. No YAML knowledge required.
+
+Install the `/implement-plan` Claude Code slash command for even faster access:
+
+```bash
+implement-plan install-skill
+# Then in any Claude Code session: /implement-plan build user auth with JWT
+```
+
+The skill generates the plan via CLI (provider-agnostic), then reviews it with you in chat before executing.
+
+## Manual Usage
 
 ```bash
 # From the project you want to build features in:

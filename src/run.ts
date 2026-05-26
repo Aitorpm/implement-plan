@@ -2,7 +2,8 @@
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
-import { execSync } from 'child_process'
+import * as readline from 'readline'
+import { execSync, spawnSync } from 'child_process'
 import { parsePlan } from './plan-parser'
 import { runPhase, PhaseResult, activeWorktrees } from './phase-runner'
 import { validatePlan } from './plan-validator'
@@ -10,6 +11,7 @@ import { ClaudeProvider } from './providers/claude'
 import { CodexProvider } from './providers/codex'
 import { ProviderRegistry } from './providers/registry'
 import { ModelTier } from './providers/types'
+import { generatePlan, toSlug } from './plan-generator'
 
 interface ModelConfig {
   claude?: Partial<Record<ModelTier, string>>
@@ -24,25 +26,61 @@ interface Progress {
 }
 
 interface ParsedArgs {
-  subcommand: 'execute' | 'validate'
+  subcommand: 'execute' | 'validate' | 'generate' | 'install-skill'
   planPath: string
+  description: string
   sequential: boolean
   dryRun: boolean
   dirtyOk: boolean
   restart: boolean
   fromPhase: number
   provider?: string
+  saveOnly: boolean
 }
 
 function parseArgs(args: string[]): ParsedArgs {
-  const isValidate = args[0] === 'validate'
-  const planArg = isValidate ? args[1] : args[0]
-  const rest = isValidate ? args.slice(2) : args.slice(1)
+  const defaults: ParsedArgs = {
+    subcommand: 'execute',
+    planPath: '',
+    description: '',
+    sequential: false,
+    dryRun: false,
+    dirtyOk: false,
+    restart: false,
+    fromPhase: 1,
+    saveOnly: false,
+  }
 
+  if (args[0] === 'validate') {
+    return { ...defaults, subcommand: 'validate', planPath: args[1] ? path.resolve(args[1]) : '' }
+  }
+
+  if (args[0] === 'install-skill') {
+    return { ...defaults, subcommand: 'install-skill' }
+  }
+
+  if (args[0] === 'generate') {
+    const rest = args.slice(1)
+    const flags = rest.filter(a => a.startsWith('--'))
+    const words = rest.filter(a => !a.startsWith('--'))
+    const providerArg = flags.find(a => a.startsWith('--provider='))?.split('=')[1]
+    return {
+      ...defaults,
+      subcommand: 'generate',
+      description: words.join(' '),
+      dryRun: flags.includes('--dry-run'),
+      saveOnly: flags.includes('--save-only'),
+      provider: providerArg,
+    }
+  }
+
+  // Default: execute
+  const planArg = args[0]
+  const rest = args.slice(1)
   const providerArg = rest.find(a => a.startsWith('--provider='))?.split('=')[1]
-
   return {
-    subcommand: isValidate ? 'validate' : 'execute',
+    ...defaults,
+    subcommand: 'execute',
     planPath: planArg ? path.resolve(planArg) : '',
     sequential: rest.includes('--sequential'),
     dryRun: rest.includes('--dry-run'),
@@ -103,6 +141,108 @@ function checkGitClean(workDir: string, dirtyOk: boolean): void {
   } catch (err: any) {
     if (err.message?.includes('uncommitted')) throw err
     console.warn('  ⚠ Not a git repository — parallel phases will not work')
+  }
+}
+
+function prompt(question: string): Promise<string> {
+  return new Promise(resolve => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(question, answer => {
+      rl.close()
+      resolve(answer.trim().toLowerCase())
+    })
+  })
+}
+
+async function runGenerate(description: string, workDir: string, opts: ParsedArgs): Promise<void> {
+  if (!description.trim()) {
+    console.error('Error: provide a feature description.\nExample: implement-plan generate "build user auth with JWT"')
+    process.exit(1)
+  }
+
+  const config = loadUserConfig(workDir)
+  const registry = setupProviders(config, opts.provider)
+
+  const abortController = new AbortController()
+  process.on('SIGINT', () => {
+    abortController.abort()
+    process.exit(130)
+  })
+
+  if (opts.dryRun) {
+    console.log(`[DRY RUN] Would generate plan for: "${description}"`)
+    console.log(`[DRY RUN] Provider: ${registry.providers[0].name} (haiku)`)
+    return
+  }
+
+  let planText: string
+  try {
+    planText = await generatePlan(description, workDir, registry)
+  } catch (err: any) {
+    console.error(`\nGeneration failed: ${err.message}`)
+    process.exit(1)
+  }
+
+  if (!planText.trim()) {
+    console.error('\nGeneration produced no output. Try again or use a different provider.')
+    process.exit(1)
+  }
+
+  // Save to ~/.claude/plans/<slug>.md
+  const slug = toSlug(description)
+  const plansDir = path.join(os.homedir(), '.claude', 'plans')
+  fs.mkdirSync(plansDir, { recursive: true })
+  const planPath = path.join(plansDir, `${slug}.md`)
+  fs.writeFileSync(planPath, planText, 'utf-8')
+
+  if (opts.saveOnly) {
+    console.log(`\nSaved: ${planPath}`)
+    return
+  }
+
+  // Display
+  const divider = '─'.repeat(50)
+  console.log(`\n${divider}`)
+  console.log(planText)
+  console.log(divider)
+  console.log(`\nSaved: ${planPath}`)
+
+  // Interactive review loop
+  while (true) {
+    const answer = await prompt('\n[Y]es execute / [e]dit / [s]ave only / [a]bort: ')
+
+    if (answer === '' || answer === 'y' || answer === 'yes') {
+      console.log()
+      const { ok } = validatePlan(planPath, workDir)
+      if (!ok) {
+        console.log('\nFix the errors above ([e]dit) before executing.')
+        continue
+      }
+      await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false })
+      return
+    }
+
+    if (answer === 'e' || answer === 'edit') {
+      const editor = process.env.EDITOR || process.env.VISUAL || 'vi'
+      spawnSync(editor, [planPath], { stdio: 'inherit' })
+      const updated = fs.readFileSync(planPath, 'utf-8')
+      console.log(`\n${divider}`)
+      console.log(updated)
+      console.log(divider)
+      continue
+    }
+
+    if (answer === 's' || answer === 'save') {
+      console.log(`Saved: ${planPath}`)
+      console.log(`Run when ready: implement-plan ${planPath}`)
+      return
+    }
+
+    if (answer === 'a' || answer === 'abort') {
+      try { fs.unlinkSync(planPath) } catch {}
+      console.log('Aborted.')
+      process.exit(0)
+    }
   }
 }
 
@@ -200,17 +340,40 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
   if (!opts.dryRun && fs.existsSync(progressPath)) fs.unlinkSync(progressPath)
 }
 
-const USAGE = `Usage:
-  implement-plan <plan.md> [options]        Execute a plan
-  implement-plan validate <plan.md>         Validate plan structure
+function runInstallSkill(): void {
+  const src = path.join(__dirname, 'skill', 'implement-plan.md')
+  if (!fs.existsSync(src)) {
+    console.error(`Skill file not found at ${src}. Run 'npm run build' first.`)
+    process.exit(1)
+  }
 
-Options:
+  const destDir = path.join(os.homedir(), '.claude', 'commands')
+  fs.mkdirSync(destDir, { recursive: true })
+  const dest = path.join(destDir, 'implement-plan.md')
+  fs.copyFileSync(src, dest)
+
+  console.log(`✅ Skill installed: ${dest}`)
+  console.log(`   Use /implement-plan <description> in any Claude Code session`)
+}
+
+const USAGE = `Usage:
+  implement-plan generate <description>         Generate a plan interactively
+  implement-plan <plan.md> [options]            Execute an existing plan
+  implement-plan validate <plan.md>             Validate plan structure
+  implement-plan install-skill                  Install the /implement-plan Claude Code skill
+
+Generate options:
+  --save-only           Generate and save without the interactive review
+  --dry-run             Show what would be generated without calling the AI
+  --provider=claude|codex  Force a specific provider
+
+Execute options:
   --sequential          Run parallel phases serially (saves quota)
-  --dry-run             Print prompts without calling claude
+  --dry-run             Print prompts without calling the AI
   --from-phase=N        Start from phase N (resume after crash)
   --dirty-ok            Skip git clean check
   --restart             Ignore existing progress file
-  --provider=claude|codex  Force a specific provider first (still falls back on rate limit)`
+  --provider=claude|codex  Force a specific provider first`
 
 async function main() {
   const args = process.argv.slice(2)
@@ -226,6 +389,10 @@ async function main() {
   if (opts.subcommand === 'validate') {
     const { ok } = validatePlan(opts.planPath, workDir)
     process.exit(ok ? 0 : 1)
+  } else if (opts.subcommand === 'generate') {
+    await runGenerate(opts.description, workDir, opts)
+  } else if (opts.subcommand === 'install-skill') {
+    runInstallSkill()
   } else {
     await runExecute(opts.planPath, workDir, opts)
   }

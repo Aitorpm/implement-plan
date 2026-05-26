@@ -5,6 +5,7 @@
   "bin": { "implement-plan": "dist/run.js" },
   "scripts": {
     "build": "tsc",
+    "postbuild": "cp -r src/skill dist/skill && cp PLAN_WRITING_GUIDE.md dist/ && cp -r examples dist/",
     "dev": "tsx src/run.ts"
   },
   "dependencies": {
