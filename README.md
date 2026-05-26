@@ -139,6 +139,49 @@ Wait for rate limits to clear, then resume. Completed phases are not re-run.
 
 If your project has a `CLAUDE.md` or `.claude/CLAUDE.md`, it's automatically injected into every agent prompt. Agents follow your project's conventions, naming rules, and forbidden patterns without being told explicitly.
 
+## Maintenance — Keeping It Current
+
+This tool wraps the Claude Code CLI directly. Both the CLI and npm packages change. After any update, verify the tool still works.
+
+### Check for outdated packages
+
+```bash
+cd ~/Documents/Workspace/implement-plan
+npm outdated
+```
+
+Update minor/patch versions:
+```bash
+npm update && npm run build
+```
+
+Update across major version boundaries (check release notes first):
+```bash
+npm install typescript@latest @types/node@latest tsx@latest js-yaml@latest
+npm run build   # fix any breaking changes before committing
+```
+
+### Check for Claude CLI changes
+
+After running `claude update` or reinstalling Claude Code:
+
+```bash
+claude --version
+claude --help | grep -E "model|permission|budget|bare|turns|output"
+```
+
+Flags to verify are still present: `--permission-mode bypassPermissions`, `--bare`, `--max-budget-usd`, `--output-format stream-json`, `--allowedTools`. If any are missing or renamed, update `callClaude()` in `src/phase-runner.ts`.
+
+### Check for new Claude models
+
+```bash
+claude --help | grep -i model
+```
+
+When a new model tier is available (e.g. `sonnet-next`), add it to `MODEL_ALIAS` in `src/phase-runner.ts` and `VALID_MODELS` in `src/plan-validator.ts`.
+
+See `CLAUDE.md` for the full dependency policy and AI orchestration best practices.
+
 ## CLI Reference
 
 ```
