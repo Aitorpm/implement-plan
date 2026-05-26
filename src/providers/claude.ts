@@ -29,8 +29,9 @@ export class ClaudeProvider implements Provider {
     allowedTools: string,
     workDir: string,
     budgetUsd: number,
+    bare = true,
   ): ChildProcess {
-    return spawn('claude', [
+    const args = [
       '-p', prompt,
       '--model', model,
       '--output-format', 'stream-json',
@@ -38,8 +39,9 @@ export class ClaudeProvider implements Provider {
       '--permission-mode', 'bypassPermissions',
       '--allowedTools', allowedTools,
       '--max-budget-usd', String(budgetUsd.toFixed(2)),
-      '--bare',
-    ], { cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'] })
+    ]
+    if (bare) args.push('--bare')
+    return spawn('claude', args, { cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'] })
   }
 
   parseStream(proc: ChildProcess, prefix: string, _workDir: string): Promise<ProviderResult> {

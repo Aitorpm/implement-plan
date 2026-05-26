@@ -32,6 +32,7 @@ export class CodexProvider implements Provider {
     _allowedTools: string,
     workDir: string,
     _budgetUsd: number,
+    _bare = true,
   ): ChildProcess {
     // Codex doesn't support --allowedTools or --max-budget-usd
     // Wall-clock timeout in phase-runner is the cost guard

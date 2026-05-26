@@ -25,7 +25,7 @@ export async function generatePlan(
   console.log(`  Generating plan with ${provider.name} (fast)...`)
 
   const model = provider.modelMap['fast']
-  const proc = provider.spawn(prompt, model, 'Read', workDir, GENERATION_BUDGET_USD)
+  const proc = provider.spawn(prompt, model, 'Read', workDir, GENERATION_BUDGET_USD, false)
 
   return new Promise((resolve, reject) => {
     let lineBuffer = ''
@@ -60,14 +60,20 @@ export async function generatePlan(
               ?.filter((c: any) => c.type === 'text')
               .map((c: any) => c.text as string)
               .join('') ?? ''
-            if (content) textOutput += content
+            if (content) {
+              process.stdout.write(content)
+              textOutput += content
+            }
           }
           // Codex JSONL: text from message events
           if (event.type === 'message' && event.role === 'assistant') {
             const content: string = typeof event.content === 'string'
               ? event.content
               : (event.content as any[])?.map((c: any) => c.text ?? '').join('') ?? ''
-            if (content) textOutput += content
+            if (content) {
+              process.stdout.write(content)
+              textOutput += content
+            }
           }
         } catch {
           // non-JSON line — skip
@@ -79,6 +85,7 @@ export async function generatePlan(
       clearTimeout(timer)
       if (!done) {
         done = true
+        if (textOutput) process.stdout.write('\n')
         if (!textOutput && code !== 0) {
           reject(new Error(`${provider.name} exited with code ${code}: ${stderrBuffer.slice(0, 300)}`))
         } else {

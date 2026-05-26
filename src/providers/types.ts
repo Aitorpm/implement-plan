@@ -24,6 +24,7 @@ export interface Provider {
     allowedTools: string,
     workDir: string,
     budgetUsd: number,
+    bare?: boolean,
   ): ChildProcess
 
   parseStream(proc: ChildProcess, prefix: string, workDir: string): Promise<ProviderResult>
