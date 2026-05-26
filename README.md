@@ -169,47 +169,6 @@ Press Ctrl+C to abort. Worktrees are cleaned up safely.
 
 ---
 
-## Writing Plans by Hand (Advanced)
-
-Plans are markdown files with an embedded `phases:` YAML block:
-
-```markdown
-# My Feature
-
-Brief description.
-
-phases:
-  - id: 1
-    name: "DB Schema"
-    mode: serial
-    model: haiku          # haiku | sonnet | opus | auto (default)
-    tasks:
-      - Add User table to prisma/schema.prisma with fields: id, email, createdAt
-      - Run pnpm prisma migrate dev --name add_user
-    verify:
-      - "pnpm prisma generate"
-      - "pnpm build"
-
-  - id: 2
-    name: "Service Layer"
-    mode: serial
-    model: sonnet
-    tasks:
-      - Implement src/modules/users/user.service.ts with findById, create, update
-    verify:
-      - "pnpm build"
-```
-
-See `examples/plan-template.md` for a fully annotated template.
-See `PLAN_WRITING_GUIDE.md` for rules on writing plans that execute reliably.
-
-Validate before running:
-```bash
-implement-plan validate ~/.claude/plans/my-feature.md
-```
-
----
-
 ## Parallel Phases
 
 Two agents work simultaneously on disjoint file sets:
