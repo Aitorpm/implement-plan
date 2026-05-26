@@ -7,16 +7,18 @@ import { buildSerialPrompt, buildTeammatePrompt } from './prompt-builder'
 import { loadProjectDocs, loadPhaseFiles } from './context-loader'
 import { selectModel } from './model-selector'
 
-const MODEL_MAP: Record<string, string> = {
-  haiku:  'claude-haiku-4-5-20251001',
-  sonnet: 'claude-sonnet-4-6',
-  opus:   'claude-opus-4-7',
+// Use short model aliases — Claude Code resolves these to the latest version of each tier
+const MODEL_ALIAS: Record<string, string> = {
+  haiku:  'haiku',
+  sonnet: 'sonnet',
+  opus:   'opus',
 }
 
 const MAX_RETRIES = 2
-const MAX_TURNS = 40
 const COMPLETION_FILE = '.phase-complete.json'
 const DEFAULT_TOOLS = 'Edit,Write,Bash,Read,Glob'
+// Default budget per phase in USD — acts as a turn/cost safety net
+const DEFAULT_BUDGET_USD = 0.50
 
 // Exported so run.ts can register SIGINT cleanup
 export const activeWorktrees = new Set<string>()
@@ -46,7 +48,7 @@ export async function runPhase(
     console.log(`\n▶ Phase ${phase.id}: ${phase.name} [${phase.mode}] [${phase.model}]`)
   }
 
-  const modelId = MODEL_MAP[modelKey] ?? MODEL_MAP['sonnet']
+  const modelId = MODEL_ALIAS[modelKey] ?? 'sonnet'
   const timeoutMs = (phase.timeout_minutes ?? 15) * 60 * 1000
   const allowedTools = phase.allowed_tools?.join(',') || DEFAULT_TOOLS
 
@@ -82,7 +84,7 @@ async function runSerial(
     const prompt = buildSerialPrompt(phase, projectDocs, currentFiles, failureContext)
 
     if (opts.dryRun) {
-      console.log(`[DRY RUN] Would call claude --model ${modelId} --allowedTools ${allowedTools}`)
+      console.log(`[DRY RUN] Would call claude --model ${modelId} --permission-mode bypassPermissions --allowedTools ${allowedTools} --bare`)
       console.log(`[DRY RUN] Prompt preview:\n${prompt.slice(0, 300)}...\n`)
       return { phaseId: phase.id, success: true, costUsd: 0, filesWritten: [], attempts: 1 }
     }
@@ -251,13 +253,15 @@ async function callClaude(
   return new Promise((resolve) => {
     let done = false
 
+    const budgetUsd = (timeoutMs / 60000 / 15) * DEFAULT_BUDGET_USD  // scale with timeout
     const proc = spawn('claude', [
       '-p', prompt,
       '--model', model,
       '--output-format', 'stream-json',
-      '--max-turns', String(MAX_TURNS),
+      '--permission-mode', 'bypassPermissions',
       '--allowedTools', allowedTools,
-      '--dangerously-skip-permissions',
+      '--max-budget-usd', String(budgetUsd.toFixed(2)),
+      '--bare',  // skip Claude's own hooks, auto-memory, CLAUDE.md discovery (we inject context ourselves)
     ], { cwd, stdio: ['ignore', 'pipe', 'inherit'] })
 
     const timer = setTimeout(() => {

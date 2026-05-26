@@ -42,7 +42,7 @@ export function parsePlan(filePath: string): Phase[] {
   const content = fs.readFileSync(filePath, 'utf-8')
   const lines = content.split('\n')
 
-  const startIdx = lines.findIndex(l => /^phases:/.test(l))
+  const startIdx = lines.findIndex((l: string) => /^phases:/.test(l))
   if (startIdx === -1) throw new Error(`No 'phases:' block found in ${filePath}`)
 
   // End at the next top-level markdown heading or end of file
