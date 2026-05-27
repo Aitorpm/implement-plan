@@ -142,7 +142,7 @@ Run `claude --version` and `claude --help` after any `claude` CLI update. These 
 | Flag | Status | Notes |
 |------|--------|-------|
 | `--permission-mode bypassPermissions` | ✅ Current | Replaced `--dangerously-skip-permissions` |
-| `--bare` | ✅ Current | Skips hooks, auto-memory, CLAUDE.md discovery — always use in orchestration |
+| `--bare` | ✅ Current | Skips hooks, auto-memory, CLAUDE.md discovery. Also disables OAuth/keychain — only safe when `ANTHROPIC_API_KEY` is set |
 | `--max-budget-usd` | ✅ Current | Hard cost cap per invocation — always set this |
 | `--output-format stream-json` | ✅ Current | Required for stream parsing |
 | `--allowedTools` / `--allowed-tools` | ✅ Current | Both spellings accepted |
@@ -196,7 +196,7 @@ The prior-context floor is the key guard: because prompts now carry up to 40k ch
 Always pass `--max-budget-usd` to every claude invocation. This is the only real guard against runaway costs — there is no `--max-turns` flag. Scale the budget proportionally to the phase timeout.
 
 **`--bare` for orchestrated agents**
-Agents spawned by the orchestrator should always run with `--bare`. Without it, Claude Code auto-discovers the project's CLAUDE.md (which we inject ourselves), runs hooks, and writes to its own memory — all of which interfere with deterministic orchestration.
+`--bare` skips hooks, CLAUDE.md auto-discovery, and memory writes — all of which interfere with deterministic orchestration. However, `--bare` also disables OAuth and keychain auth, requiring `ANTHROPIC_API_KEY`. The `spawn()` default in `src/providers/claude.ts` auto-detects: `bare = !!process.env.ANTHROPIC_API_KEY`. When the API key is present, `--bare` is used and all orchestration safeguards apply; when only OAuth is available, `--bare` is skipped so auth works. Do not hard-code `bare = true` — it breaks OAuth users.
 
 **File ownership in parallel phases**
 Teammates must own completely disjoint file sets. Validate this before spawning (`validateNoFileOverlap`). Copy files from worktrees directly (`copyFiles`) instead of using `git merge` to avoid conflicts — teammates own non-overlapping files so direct copy is always safe.

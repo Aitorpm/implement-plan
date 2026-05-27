@@ -41,6 +41,14 @@ function firstExternalCommand(command: string): string | null {
 }
 
 function commandExists(command: string): boolean {
+  // Check in the current process PATH first — this covers tools like pnpm installed via
+  // homebrew whose path is in .zshrc (not loaded by sh -l on macOS).
+  try {
+    execFileSync('which', [command], { stdio: 'ignore', env: process.env })
+    return true
+  } catch { /* not in process PATH */ }
+
+  // Fallback: login shell resolves tools added via /etc/paths.d or ~/.profile
   try {
     execFileSync('sh', ['-lc', `command -v ${shellQuote(command)}`], { stdio: 'ignore' })
     return true

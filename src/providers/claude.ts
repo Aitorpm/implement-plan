@@ -29,7 +29,8 @@ export class ClaudeProvider implements Provider {
     allowedTools: string,
     workDir: string,
     budgetUsd: number,
-    bare = true,
+    // --bare disables OAuth/keychain auth — only use it when ANTHROPIC_API_KEY is present
+    bare = !!process.env.ANTHROPIC_API_KEY,
   ): ChildProcess {
     const args = [
       '-p', prompt,
