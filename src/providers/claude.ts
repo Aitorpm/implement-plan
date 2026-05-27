@@ -133,6 +133,9 @@ export class ClaudeProvider implements Provider {
             }
 
             if (event.type === 'tool_use' && (event.name === 'Write' || event.name === 'Edit')) {
+              // Dedup-only pass: filesWritten and hasCompletionFile are already populated
+              // in the streaming handler. onProgress here covers the plan-generator path
+              // (which uses only Read tool, so this branch rarely fires in practice).
               onProgress?.(`${event.name} ${event.input?.file_path ?? ''}`.trim())
               const filePath = event.input?.file_path
               if (filePath) {

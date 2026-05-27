@@ -264,8 +264,17 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
 
   // Display structured review
   let currentPlanText = planText
-  let currentPhases = parsePlan(planPath)
-  printPlanReview(currentPlanText, currentPhases)
+  let currentPhases: Phase[] = []
+  try {
+    currentPhases = parsePlan(planPath)
+    printPlanReview(currentPlanText, currentPhases)
+  } catch {
+    const divider = '─'.repeat(60)
+    console.log(`\n${divider}`)
+    console.log(currentPlanText)
+    console.log(divider)
+    console.log('  ⚠ Plan has YAML errors — use [r]evise to fix or [a]bort')
+  }
   console.log(`\nSaved: ${planPath}`)
 
   // Interactive review loop
@@ -283,9 +292,17 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
           return
         }
         currentPlanText = fs.readFileSync(planPath, 'utf-8')
-        currentPhases = parsePlan(planPath)
         console.log('\nAuto-fixed plan:')
-        printPlanReview(currentPlanText, currentPhases)
+        try {
+          currentPhases = parsePlan(planPath)
+          printPlanReview(currentPlanText, currentPhases)
+        } catch {
+          const divider = '─'.repeat(60)
+          console.log(`\n${divider}`)
+          console.log(currentPlanText)
+          console.log(divider)
+          console.log('  ⚠ Auto-fixed plan has YAML errors — use [r]evise to fix')
+        }
       }
       try {
         await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false, yes: true })
@@ -309,8 +326,16 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
       if (!instruction.trim()) continue
       await reviseSavedPlan(planPath, workDir, registry, instruction)
       currentPlanText = fs.readFileSync(planPath, 'utf-8')
-      currentPhases = parsePlan(planPath)
-      printPlanReview(currentPlanText, currentPhases)
+      try {
+        currentPhases = parsePlan(planPath)
+        printPlanReview(currentPlanText, currentPhases)
+      } catch {
+        const divider = '─'.repeat(60)
+        console.log(`\n${divider}`)
+        console.log(currentPlanText)
+        console.log(divider)
+        console.log('  ⚠ Revised plan has YAML errors — use [r]evise to fix or [a]bort')
+      }
       continue
     }
 
@@ -464,7 +489,7 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
   printPlanSummary(phases)
 
   if (!opts.yes && !opts.dryRun && process.stdin.isTTY) {
-    const answer = await prompt('Execute this plan? [y/n]: ')
+    const answer = await prompt('Execute this plan? [Y/n]: ')
     if (answer !== 'y' && answer !== 'yes' && answer !== '') {
       console.log('Aborted.')
       process.exit(0)
