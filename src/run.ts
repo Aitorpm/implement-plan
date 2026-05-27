@@ -39,6 +39,7 @@ interface ParsedArgs {
   fromPhase: number
   provider?: string
   saveOnly: boolean
+  yes: boolean
 }
 
 function parseArgs(args: string[]): ParsedArgs {
@@ -52,6 +53,7 @@ function parseArgs(args: string[]): ParsedArgs {
     restart: false,
     fromPhase: 1,
     saveOnly: false,
+    yes: false,
   }
 
   if (args[0] === 'validate') {
@@ -91,6 +93,7 @@ function parseArgs(args: string[]): ParsedArgs {
     restart: rest.includes('--restart'),
     fromPhase: (parseInt(rest.find(a => a.startsWith('--from-phase='))?.split('=')[1] ?? '1', 10) || 1),
     provider: providerArg,
+    yes: rest.includes('--yes') || rest.includes('-y'),
   }
 }
 
@@ -287,7 +290,7 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
         console.log(`\nAuto-fixed: ${planPath}`)
       }
       try {
-        await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false })
+        await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false, yes: true })
       } catch (err: any) {
         console.error(err.message ?? err)
         process.exit(1)
@@ -405,6 +408,15 @@ async function runExecute(planPath: string, workDir: string, opts: ParsedArgs): 
   if (flags.length) console.log(`Flags: ${flags.join(', ')}`)
   printPlanSummary(phases)
 
+  if (!opts.yes && !opts.dryRun && process.stdin.isTTY) {
+    const answer = await prompt('Execute this plan? [y/n]: ')
+    if (answer !== 'y' && answer !== 'yes' && answer !== '') {
+      console.log('Aborted.')
+      process.exit(0)
+    }
+    console.log()
+  }
+
   const abortController = new AbortController()
 
   process.on('SIGINT', () => {
@@ -516,6 +528,7 @@ Generate options:
   --provider=claude|codex  Force a specific provider
 
 Execute options:
+  --yes, -y             Skip the pre-execution confirmation prompt
   --sequential          Run parallel phases serially (saves quota)
   --dry-run             Print prompts without calling the AI
   --from-phase=N        Start from phase N (resume after crash)
