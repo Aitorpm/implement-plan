@@ -215,6 +215,15 @@ function buildGenerationPrompt(
     `You are writing an implementation plan for the \`implement-plan\` orchestrator.\n\n` +
     `Output ONLY the markdown plan file — start with a # heading, include a one-sentence description, then the phases: YAML block. ` +
     `No preamble. No code fences around the whole file. No commentary after.\n\n` +
+    `SCOPE PRESERVATION — THIS IS THE MOST IMPORTANT RULE:\n` +
+    `The feature description below is the authoritative spec. Every requirement it contains MUST appear in the plan.\n` +
+    `- Copy exact names verbatim: type names, field names, enum values, constant names, endpoint paths, component names, label keys.\n` +
+    `  Do NOT paraphrase ("add the status enum" loses the enum values — write them out).\n` +
+    `- If the spec lists a set of items (e.g. 6 status values, 8 label keys, 4 endpoints), every item must appear in a task.\n` +
+    `- Use multi-line task blocks (YAML | scalar) for any task that needs to reproduce a list of names or a type definition.\n` +
+    `  A one-line task that says "create the types file" when the spec lists 8 fields is SCOPE LOSS.\n` +
+    `- Use the context: field to carry forward constraints and conventions that are not in the task imperative itself.\n` +
+    `- A plan that omits requirements from the spec is a FAILURE, even if it is syntactically valid.\n\n` +
     `VERIFY COMMAND RULES:\n` +
     `- For any phase that creates or modifies a database schema (Prisma, SQL, etc.), the verify command MUST include ` +
     `field-presence checks alongside the build check. ` +
@@ -256,6 +265,10 @@ function buildRevisionPrompt(
     `You are revising an implementation plan for the \`implement-plan\` orchestrator.\n\n` +
     `Return the COMPLETE corrected markdown plan file only. Start with a # heading, include a short description, then a valid phases: YAML block. ` +
     `Do not include preamble, explanations, code fences around the whole file, or commentary after the plan.\n\n` +
+    `SCOPE PRESERVATION:\n` +
+    `Apply ONLY the revision instruction below. Do NOT drop, summarise, or compress any tasks, field names, enum values, ` +
+    `or identifiers that already exist in the current plan. Scope may only grow, never shrink, unless the instruction ` +
+    `explicitly says to remove something.\n\n` +
     `VERIFY COMMAND RULES:\n` +
     `- Phases that create DB schema fields must include \`grep -q "fieldName" prisma/schema.prisma\` checks.\n` +
     `- Phases that add constants must grep for the constant name in the constants file.\n` +

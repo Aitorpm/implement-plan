@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as readline from 'readline'
 import { execSync } from 'child_process'
-import { parsePlan, Phase } from './plan-parser'
+import { parsePlan, Phase, SerialPhase, ParallelPhase } from './plan-parser'
 import { runPhase, PhaseResult, activeWorktrees } from './phase-runner'
 import { PlanValidationSummary, validatePlan } from './plan-validator'
 import { ClaudeProvider } from './providers/claude'
@@ -262,16 +262,15 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
     return
   }
 
-  // Display
-  const divider = '─'.repeat(50)
-  console.log(`\n${divider}`)
-  console.log(planText)
-  console.log(divider)
+  // Display structured review
+  let currentPlanText = planText
+  let currentPhases = parsePlan(planPath)
+  printPlanReview(currentPlanText, currentPhases)
   console.log(`\nSaved: ${planPath}`)
 
   // Interactive review loop
   while (true) {
-    const answer = await prompt('\n[Y]es execute / [r]evise with prompt / [s]ave only / [a]bort: ')
+    const answer = await prompt('\n[Y]es execute / [v]iew full YAML / [r]evise / [s]ave only / [a]bort: ')
 
     if (answer === '' || answer === 'y' || answer === 'yes') {
       console.log()
@@ -283,11 +282,10 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
           console.log(`Run when ready: implement-plan generate "${description}"`)
           return
         }
-        const updated = fs.readFileSync(planPath, 'utf-8')
-        console.log(`\n${divider}`)
-        console.log(updated)
-        console.log(divider)
-        console.log(`\nAuto-fixed: ${planPath}`)
+        currentPlanText = fs.readFileSync(planPath, 'utf-8')
+        currentPhases = parsePlan(planPath)
+        console.log('\nAuto-fixed plan:')
+        printPlanReview(currentPlanText, currentPhases)
       }
       try {
         await runExecute(planPath, workDir, { ...opts, restart: false, fromPhase: 1, dryRun: false, yes: true })
@@ -298,16 +296,21 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
       return
     }
 
+    if (answer === 'v' || answer === 'view') {
+      const divider = '─'.repeat(60)
+      console.log(`\n${divider}`)
+      console.log(currentPlanText)
+      console.log(divider)
+      continue
+    }
+
     if (answer === 'r' || answer === 'revise' || answer === 'e' || answer === 'edit') {
       const instruction = await promptRaw('\nDescribe the plan change: ')
-      if (!instruction.trim()) {
-        continue
-      }
+      if (!instruction.trim()) continue
       await reviseSavedPlan(planPath, workDir, registry, instruction)
-      const updated = fs.readFileSync(planPath, 'utf-8')
-      console.log(`\n${divider}`)
-      console.log(updated)
-      console.log(divider)
+      currentPlanText = fs.readFileSync(planPath, 'utf-8')
+      currentPhases = parsePlan(planPath)
+      printPlanReview(currentPlanText, currentPhases)
       continue
     }
 
@@ -323,6 +326,58 @@ async function runGenerate(description: string, workDir: string, opts: ParsedArg
       process.exit(0)
     }
   }
+}
+
+function firstLine(task: unknown, maxLen = 90): string {
+  const raw = typeof task === 'string' ? task : JSON.stringify(task) ?? ''
+  const line = raw.trim().split('\n')[0].replace(/^\s*[-*]\s*/, '')
+  return line.length > maxLen ? line.slice(0, maxLen - 1) + '…' : line
+}
+
+function printPlanReview(planText: string, phases: Phase[]): void {
+  const lines = planText.split('\n')
+  const yamlStart = lines.findIndex(l => /^phases:/.test(l))
+  const headerLines = lines.slice(0, yamlStart < 0 ? lines.length : yamlStart).filter(l => l.trim())
+  const title = headerLines.find(l => l.startsWith('#'))?.replace(/^#+\s*/, '') ?? 'Plan'
+  const description = headerLines.filter(l => !l.startsWith('#') && l.trim()).join(' ')
+
+  const bar = '─'.repeat(60)
+  console.log(`\n${bar}`)
+  console.log(` ${title}`)
+  if (description) {
+    const wrapped = description.length > 110 ? description.slice(0, 109) + '…' : description
+    console.log(` ${wrapped}`)
+  }
+
+  for (const phase of phases) {
+    const modelLabel = (phase.model && phase.model !== 'auto') ? phase.model : 'auto'
+    const timeoutNote = phase.timeout_minutes ? ` · ${phase.timeout_minutes}m` : ''
+    console.log(`\n Phase ${phase.id} · ${phase.name}  [${phase.mode} · ${modelLabel}${timeoutNote}]`)
+
+    if (phase.mode === 'serial') {
+      const p = phase as SerialPhase
+      p.tasks.forEach((t, i) => console.log(`   ${i + 1}. ${firstLine(t)}`))
+      if (p.verify?.length) console.log(`   ✓ ${p.verify.join('  ·  ')}`)
+      if (p.project_context_files?.length) {
+        console.log(`   📁 ${p.project_context_files.join('  ')}`)
+      }
+    } else {
+      const p = phase as ParallelPhase
+      for (const [label, tm] of [['A', p.teammate_A], ['B', p.teammate_B]] as const) {
+        console.log(`   ${label}: ${tm.name}`)
+        tm.tasks.forEach((t, i) => console.log(`     ${i + 1}. ${firstLine(t, 80)}`))
+        console.log(`      ✓ ${tm.verify}`)
+        if (tm.files?.length) console.log(`      📁 ${tm.files.slice(0, 4).join('  ')}${tm.files.length > 4 ? ` +${tm.files.length - 4} more` : ''}`)
+      }
+      if (p.post_parallel_verify?.length) {
+        console.log(`   ✓ post-merge: ${p.post_parallel_verify.join('  ·  ')}`)
+      }
+    }
+  }
+
+  const totalAgents = phases.reduce((s, p) => s + (p.mode === 'parallel' ? 2 : 1), 0)
+  console.log(`\n ${phases.length} phase${phases.length === 1 ? '' : 's'} · ${totalAgents} agent${totalAgents === 1 ? '' : 's'} total`)
+  console.log(bar)
 }
 
 function printPlanSummary(phases: Phase[]): void {
