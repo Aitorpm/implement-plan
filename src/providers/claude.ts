@@ -29,7 +29,8 @@ export class ClaudeProvider implements Provider {
     allowedTools: string,
     workDir: string,
     budgetUsd: number,
-    bare = true,
+    // --bare disables OAuth/keychain auth — only use it when ANTHROPIC_API_KEY is present
+    bare = !!process.env.ANTHROPIC_API_KEY,
   ): ChildProcess {
     const args = [
       '-p', prompt,
@@ -87,6 +88,27 @@ export class ClaudeProvider implements Provider {
                 result.assistantText += textContent
               }
             }
+            if (event.type === 'tool_use') {
+              const name: string = event.name
+              const input: any = event.input ?? {}
+              if (name === 'Write' || name === 'Edit') {
+                const fp: string = input.file_path ?? ''
+                if (fp && !result.filesWritten.includes(fp)) {
+                  result.filesWritten.push(fp)
+                  if (fp.endsWith('.phase-complete.json')) result.hasCompletionFile = true
+                }
+                if (fp && !fp.endsWith('.phase-complete.json')) {
+                  const icon = name === 'Write' ? '✍ ' : '✏ '
+                  process.stdout.write(`${prefix}${icon} ${fp}\n`)
+                }
+              } else if (name === 'Bash') {
+                const cmd: string = (input.command ?? '').split('\n')[0].trim()
+                if (cmd) {
+                  const display = cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd
+                  process.stdout.write(`${prefix}$  ${display}\n`)
+                }
+              }
+            }
           } catch {
             // partial line — skip display
           }
@@ -111,6 +133,9 @@ export class ClaudeProvider implements Provider {
             }
 
             if (event.type === 'tool_use' && (event.name === 'Write' || event.name === 'Edit')) {
+              // Dedup-only pass: filesWritten and hasCompletionFile are already populated
+              // in the streaming handler. onProgress here covers the plan-generator path
+              // (which uses only Read tool, so this branch rarely fires in practice).
               onProgress?.(`${event.name} ${event.input?.file_path ?? ''}`.trim())
               const filePath = event.input?.file_path
               if (filePath) {

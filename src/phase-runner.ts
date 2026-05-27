@@ -328,6 +328,7 @@ async function runSerial(
       commitPhaseFiles(workDir, phase.id, phase.name, allFilesWritten)
       const reviewNote = !review.passed ? ' [review warnings]' : ''
       console.log(`  ✅ Phase ${phase.id} verified [${result.providerUsed}, ${result.costUsd > 0 ? `$${result.costUsd.toFixed(4)}` : 'no cost reported'}]${reviewNote}`)
+      printFileSummary(allFilesWritten, workDir)
       return { phaseId: phase.id, success: true, costUsd: totalCost, filesWritten: allFilesWritten, attempts: attempt, providerUsed: lastProviderUsed }
     }
 
@@ -499,6 +500,7 @@ async function runParallel(
       const verify = captureVerify(phase.post_parallel_verify, workDir)
       if (verify.ok) {
         console.log(`  ✅ Phase ${phase.id} merged and verified [${lastProviders}]`)
+        printFileSummary(allFilesWritten, workDir)
         return { phaseId: phase.id, success: true, costUsd: totalCost, filesWritten: allFilesWritten, attempts: attempt, providerUsed: lastProviders }
       }
 
@@ -572,4 +574,16 @@ function copyFiles(srcDir: string, dstDir: string, files: string[]): string[] {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function printFileSummary(filesWritten: string[], workDir: string): void {
+  const display = filesWritten.filter(f =>
+    !f.endsWith('.phase-complete.json') &&
+    !f.endsWith('.phase-review.json') &&
+    !f.endsWith('.implement-plan-progress.json'),
+  )
+  if (display.length === 0) return
+  const rel = (f: string) => f.startsWith(workDir + '/') ? f.slice(workDir.length + 1) : f
+  console.log(`  Files (${display.length}):`)
+  for (const f of display) console.log(`    ${rel(f)}`)
 }
