@@ -88,6 +88,27 @@ export class ClaudeProvider implements Provider {
                 result.assistantText += textContent
               }
             }
+            if (event.type === 'tool_use') {
+              const name: string = event.name
+              const input: any = event.input ?? {}
+              if (name === 'Write' || name === 'Edit') {
+                const fp: string = input.file_path ?? ''
+                if (fp && !result.filesWritten.includes(fp)) {
+                  result.filesWritten.push(fp)
+                  if (fp.endsWith('.phase-complete.json')) result.hasCompletionFile = true
+                }
+                if (fp && !fp.endsWith('.phase-complete.json')) {
+                  const icon = name === 'Write' ? '✍ ' : '✏ '
+                  process.stdout.write(`${prefix}${icon} ${fp}\n`)
+                }
+              } else if (name === 'Bash') {
+                const cmd: string = (input.command ?? '').split('\n')[0].trim()
+                if (cmd) {
+                  const display = cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd
+                  process.stdout.write(`${prefix}$  ${display}\n`)
+                }
+              }
+            }
           } catch {
             // partial line — skip display
           }
